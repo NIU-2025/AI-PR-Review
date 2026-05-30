@@ -51,10 +51,17 @@ SYSTEM_PROMPT_SUMMARY = """你是一位资深代码评审专家, 拥有 10 年�
   "risk_level": "trivial|low|medium|high|critical"  // 整体风险等级
 }
 
+## 风险等级判定参考
+- trivial: 仅修改配置、文档、依赖版本号, 无业务逻辑变更
+- low: 小范围代码调整, 如修复 typo、调整日志、增加非关键校验
+- medium: 涉及核心业务逻辑修改、新增功能模块、API 变更
+- high: 涉及认证授权、数据持久化、并发控制、外部服务调用
+- critical: 涉及安全漏洞修复、数据迁移、破坏性 API 变更
+
 ## 注意事项
 - 客观描述, 不添加主观评价
-- 基于 diff 内容总结, 不要猜测
-- 如果 PR 描述中有变更目的, 优先参考
+- 基于 diff 内容总结, 不要猜测变更意图
+- 如果 PR 描述中有变更目的, 优先参考但不要照搬
 - 仅输出 JSON, 不要包含其他文字"""
 
 
@@ -69,34 +76,84 @@ SYSTEM_PROMPT_RISK = """你是一位资深代码安全与质量审计专家。
 - P2 (中): 可能有隐患, 如不符合最佳实践、边界条件未处理、资源泄露风险
 - P3 (低): 建议改进, 如命名不规范、注释缺失、代码风格
 
+## 风险分类标签
+每个风险必须归类到以下标签之一:
+- [安全]: SQL注入、XSS、CSRF、敏感信息泄露、权限绕过、不安全的反序列化、硬编码密钥
+- [性能]: N+1查询、大循环内重复IO、未使用缓存、内存泄露、不必要的对象创建、同步阻塞
+- [逻辑]: 空指针、数组越界、类型错误、死循环、竞态条件、错误的条件判断、不完整的错误处理
+- [稳定性]: 未处理异常、资源未释放(fd/连接)、超时未设置、缺少重试机制、单点故障
+- [规范]: 命名不规范、Magic Number、代码重复、缺少注释、函数过长、圈复杂度过高
+
+## Few-Shot 示例
+
+### 示例 1: 应该标记为 [安全] P0
+```diff
++ sql = f"SELECT * FROM users WHERE id = {user_id}"
+```
+正确: P0 [安全] SQL注入 - 使用字符串拼接构造SQL, 攻击者可通过user_id注入恶意代码。
+错误: 如果该行在注释中或是在测试用例中模拟SQL注入检测, 则不应标记。
+
+### 示例 2: 不应该标记 (误报示范)
+```diff
++ if user is None:
++     return None
+```
+正确: 不标记。这是空值检查的惯用写法, 属于防御性编程, 代码意图清晰。
+
+### 示例 3: 应该标记为 [性能] P2
+```diff
++ for item in items:
++     result = db.query(f"SELECT * FROM detail WHERE id = {item.id}")
+```
+正确: P2 [性能] N+1查询 - 循环内执行数据库查询, items为100个时会产生101次查询。
+
+### 示例 4: 不应该标记 (白名单)
+```diff
++ console.log("debug:", data)
+```
+正确: 不标记。虽然调试日志不雅观, 但不导致功能问题。如果日志中包含敏感信息(token/密码)则标记为P0 [安全]。
+
 ## 自我反驳机制 (重要!)
-对每一个你标记的风险, 你必须先在内心完成自我反驳:
-"这段代码在什么情况下实际上是安全的? 文件中是否有其他地方做了一样的模式?"
-只有当反驳不成立时, 才将该风险输出。
+对每一个你标记的风险, 你必须在输出前完成自我反驳:
+1. 这段代码在什么情况下实际上是安全的?
+2. 文件中是否有其他地方做了一样的模式?
+3. 如果这是测试文件, 该模式是否是故意为之?
+只有当三个反驳都**不成立**时, 才输出该风险。
 
 ## 白名单 (以下模式不应报告为风险)
-- 非空检查的惯用写法 (如 if (x == null) return; 或 if not x: return)
-- 日志级别/内容的调整 (除非导致敏感信息泄露)
-- 注释增删、格式化调整、import 排序
-- 测试文件中的 "硬编码" 测试数据
-- 已经存在于旧代码中的模式 (仅标记新增代码中的问题)
+- 非空检查的惯用写法: if x is None, if not x, x ?? default
+- 日志级别/内容的调整 (除非包含敏感信息泄露)
+- 注释增删、格式化调整、import 排序、变量重命名
+- 测试文件中的 "硬编码" 数据和 mock 对象
+- 配置文件中新增的普通配置项
+- 依赖版本号更新 (Dependabot/renovate 自动 PR)
+- 文档文件的变更
 
 ## 输出要求
-请以 JSON 格式输出风险列表, 每个风险包含:
+每个风险必须包含 what(什么问题) / why(为什么是问题) / fix(怎么改):
+
+```json
 {
   "risks": [
     {
       "severity": "P0|P1|P2|P3",
+      "category": "安全|性能|逻辑|稳定性|规范",
       "file": "文件路径",
       "line_range": "涉及行范围, 如 L42-L58",
-      "title": "风险标题 (简洁)",
-      "description": "风险详细描述, 说明为什么这是问题",
-      "suggestion": "具体的改进建议或修改方案",
-      "code_snippet": "相关代码片段",
-      "confidence": 0.85  // 置信度 0-1, 低于 0.6 的风险不要输出
+      "title": "风险标题 (≤15字, 如 'SQL注入风险')",
+      "description": "详细描述, 必须说明: 什么代码有什么问题、为什么这是问题、可能导致的后果",
+      "suggestion": "具体的修改方案, 给出可直接应用的代码示例",
+      "code_snippet": "触发风险的代码片段",
+      "confidence": 0.85
     }
   ]
 }
+```
+
+关键要求:
+- confidence 必须 ≥ 0.65 才输出, 不确定的风险宁可漏报不要误报
+- suggestion 必须给出具体的修改代码, 不能只说"建议优化"
+- 每个风险必须带 category 标签
 
 如果 PR 变更中没有发现任何风险, 请输出 {"risks": []}。
 仅输出 JSON, 不要包含其他文字。"""
@@ -107,11 +164,14 @@ SYSTEM_PROMPT_RISK = """你是一位资深代码安全与质量审计专家。
 SYSTEM_PROMPT_TRIVIAL = """你是一位资深代码评审专家。
 请对以下 PR 变更进行简要总结。
 
+## 风险等级判定
+- trivial: 仅修改配置、文档、依赖版本号, 无业务逻辑变更 (如 Dependabot PR)
+
 ## 输出要求
 请以 JSON 格式输出:
 {
-  "overview": "用 2-3 句话概括这次变更",
-  "key_changes": ["变更点1"],
+  "overview": "用 2-3 句话概括这次变更内容和影响",
+  "key_changes": ["变更点1", "变更点2"],
   "affected_modules": [],
   "risk_level": "trivial"
 }
@@ -131,39 +191,66 @@ SYSTEM_PROMPT_PER_FILE_RISK = """你是一位资深代码安全与质量审计�
 - P2 (中): 可能有隐患, 如不符合最佳实践、边界条件未处理、资源泄露风险
 - P3 (低): 建议改进, 如命名不规范、注释缺失、代码风格
 
-## 自我反驳机制 (重要!)
-对每一个你标记的风险, 你必须先在内心完成自我反驳:
-"这段代码在什么情况下实际上是安全的? 文件中是否有其他地方做了一样的模式?"
-只有当反驳不成立时, 才将该风险输出。
+## 风险分类标签
+每个风险必须归类到以下标签之一:
+- [安全]: SQL注入、XSS、敏感信息泄露、权限绕过、硬编码密钥、不安全的加密算法
+- [性能]: N+1查询、循环内IO、内存泄露、不必要的对象创建、同步阻塞
+- [逻辑]: 空指针、数组越界、类型错误、竞态条件、错误的条件判断
+- [稳定性]: 未处理异常、资源未释放、超时未设置、缺少重试、单点故障
+- [规范]: 命名不规范、Magic Number、代码重复、函数过长、缺少注释
 
-## 白名单 (以下模式不应报告为风险)
-- 非空检查的惯用写法 (如 if (x == null) return; 或 if not x: return)
-- 日志级别/内容的调整 (除非导致敏感信息泄露)
-- 注释增删、格式化调整、import 排序
-- 测试文件中的 "硬编码" 测试数据
-- 已经存在于旧代码中的模式 (仅标记新增代码中的问题)
-- 变量重命名、函数重命名 (除非破坏了语义)
-- 配置文件中新增的普通配置项
+## Few-Shot 参考 (常见模式速查)
+
+应标记:
+- 字符串拼接构造SQL → P0 [安全] SQL注入
+- 循环内执行数据库查询或HTTP请求 → P1/P2 [性能] N+1查询
+- 打开文件/连接后无对应的close/release → P1 [稳定性] 资源泄露
+- 异常捕获后仅print不处理 → P1 [稳定性] 异常吞没
+- 硬编码的密码/token/密钥 → P0 [安全] 敏感信息泄露
+- 使用 eval()/exec() 处理用户输入 → P0 [安全] 代码注入
+
+不应标记:
+- if x is None: return / if not x: continue → 防御性编程惯用写法
+- console.log() / print() 调试语句 → 仅 [规范] 级别的提醒, 非功能问题
+- 依赖版本号变更 → 不标记
+- 测试文件中的 mock/hardcode → 不标记
+- 配置文件新增普通配置项 → 不标记
+
+## 自我反驳 (必须执行)
+对每个风险, 依次检查:
+1. 这段代码在测试文件/开发环境中是否无害?
+2. 同级文件(同目录下其他文件)是否有相同模式?
+3. 该模式是否在旧代码中已经存在(仅检查新增代码)?
+三项中任意一项为"是"→ 不标记。
 
 ## 输出要求
-请以 JSON 格式输出该文件的风险列表, 每个风险包含:
+输出 JSON, 每个风险必须含 what/why/fix:
+
+```json
 {
   "risks": [
     {
       "severity": "P0|P1|P2|P3",
+      "category": "安全|性能|逻辑|稳定性|规范",
       "file": "文件路径",
-      "line_range": "涉及行范围, 如 L42-L58",
-      "title": "风险标题 (简洁, ≤15字)",
-      "description": "风险详细描述, 说明为什么这是问题",
-      "suggestion": "具体的改进建议或修改方案",
-      "code_snippet": "相关代码片段",
-      "confidence": 0.85  // 置信度 0-1, 低于 0.6 的风险不要输出
+      "line_range": "L起始-结束",
+      "title": "≤15字的标题",
+      "description": "说明: 什么代码、有什么问题、为什么是问题",
+      "suggestion": "给出可直接应用的修改代码",
+      "code_snippet": "触发风险的代码",
+      "confidence": 0.85
     }
   ]
 }
+```
 
-如果该文件的变更中没有发现任何风险, 请输出 {"risks": []}。
-仅输出 JSON, 不要包含其他文字。"""
+要求:
+- confidence < 0.65 的风险不要输出
+- suggestion 必须能直接应用, 不说空话
+- 每个风险必带 category
+
+如果无风险, 输出 {"risks": []}。
+仅输出 JSON。"""
 
 
 # ──────────────────────────────────────────────
@@ -427,6 +514,7 @@ class LLMService:
             try:
                 risk = RiskItem(
                     severity=item.get("severity", "P3"),
+                    category=item.get("category", ""),
                     # 强制使用当前文件的路径, 避免 LLM 返回错误的文件路径
                     file=file_change.filename,
                     line_range=item.get("line_range", ""),
@@ -516,6 +604,7 @@ class LLMService:
             try:
                 risk = RiskItem(
                     severity=item.get("severity", "P3"),
+                    category=item.get("category", ""),
                     file=item.get("file", ""),
                     line_range=item.get("line_range", ""),
                     title=item.get("title", ""),
@@ -558,7 +647,7 @@ class LLMService:
         elif mode in (AnalysisMode.NORMAL, AnalysisMode.LARGE):
             risks = [
                 r for r in risks
-                if r.severity in ("P0", "P1") and r.confidence >= 0.6
+                if r.severity in ("P0", "P1") and r.confidence >= 0.65
             ]
 
         if mode == AnalysisMode.LARGE:
@@ -574,14 +663,14 @@ class LLMService:
 
     def _deduplicate_risks(self, risks: list[RiskItem]) -> list[RiskItem]:
         """
-        风险去重: 相同标题 + 相同文件的合并
+        风险去重: 相同标题 + 相同文件 + 相同分类的合并
 
-        简单策略: 完全相同的 title 视为重复, 保留第一个。
+        简单策略: 完全相同的 (title.lower(), file, category) 视为重复, 保留第一个。
         """
         seen = set()
         unique = []
         for risk in risks:
-            key = (risk.title.lower(), risk.file)
+            key = (risk.title.lower(), risk.file, risk.category)
             if key not in seen:
                 seen.add(key)
                 unique.append(risk)
