@@ -39,6 +39,9 @@ let riskIndex = 0;
 // 当前活跃的筛选 (all = 显示全部)
 let currentFilter = 'all';
 
+// 防抖: 防止快速重复提交
+let isAnalyzing = false;
+
 // ── 事件绑定 ──
 
 analyzeBtn.addEventListener('click', handleAnalyze);
@@ -50,6 +53,12 @@ prUrlInput.addEventListener('keydown', (e) => {
 
 async function handleAnalyze() {
     const prUrl = prUrlInput.value.trim();
+
+    // ── 防抖: 分析进行中不允许重复提交 ──
+    if (isAnalyzing) {
+        console.log('分析正在进行中, 忽略重复提交');
+        return;
+    }
 
     // ── 输入校验 ──
     if (!prUrl) {
@@ -63,6 +72,7 @@ async function handleAnalyze() {
 
     // ── 重置状态 ──
     setLoading(true);
+    isAnalyzing = true;
     hideStatus();
     hideResult();
     resetProgress();
@@ -115,6 +125,7 @@ async function handleAnalyze() {
         showStatus(`❌ ${error.message}`, 'error');
     } finally {
         setLoading(false);
+        isAnalyzing = false;
         currentAbortController = null;
     }
 }

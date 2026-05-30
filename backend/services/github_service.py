@@ -209,6 +209,14 @@ class GitHubService:
             page += 1
 
         logger.info(f"获取到 {len(all_files)} 个文件变更 (共 {page} 页)")
+
+        # 超大 PR 截断警告
+        if page > max_pages or (page == max_pages and len(all_files) >= max_pages * 100):
+            logger.warning(
+                f"PR 包含超过 {max_pages * 100} 个文件变更, "
+                f"仅获取前 {len(all_files)} 个。"
+                f"完整分析可能不准确。"
+            )
         return all_files
 
     def _request_with_retry(
