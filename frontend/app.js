@@ -5,7 +5,10 @@
  * - 提交 PR URL 到后端 /api/review/stream (SSE 流式分析)
  * - 渐进渲染: 先出总结 → 逐个出风险 → 最后出元信息
  * - 进度条 + 实时状态文字
- * - 错误处理与 loading 状态
+ * - 代码语法高亮 (highlight.js)
+ * - 风险分类筛选栏 (安全/性能/逻辑/稳定性/规范)
+ * - P0 风险默认展开 + 入场动画
+ * - 错误重试机制
  */
 
 const API_BASE = window.location.origin;
@@ -23,6 +26,8 @@ const progressText = document.getElementById('progressText');
 const progressBarFill = document.getElementById('progressBarFill');
 const progressSubtext = document.getElementById('progressSubtext');
 const resultSection = document.getElementById('resultSection');
+const riskFilterBar = document.getElementById('riskFilterBar');
+const riskCountBadge = document.getElementById('riskCountBadge');
 
 // 流式分析 AbortController, 用于取消分析
 let currentAbortController = null;
@@ -30,6 +35,9 @@ let currentAbortController = null;
 // 收集流式到达的风险项
 let riskItems = [];
 let riskIndex = 0;
+
+// 当前活跃的筛选 (all = 显示全部)
+let currentFilter = 'all';
 
 // ── 事件绑定 ──
 
@@ -60,6 +68,10 @@ async function handleAnalyze() {
     resetProgress();
     riskItems = [];
     riskIndex = 0;
+    currentFilter = 'all';
+
+    // 重置筛选栏
+    resetFilterBar();
 
     // 清空结果区域
     document.getElementById('summaryContent').innerHTML = '';
@@ -263,11 +275,16 @@ function handleSSEEvent(event, dataStr, ctx) {
             if (metaElement) {
                 renderMeta(null, info);
             }
-            // 如果没有风险, 显示"无风险"提示
+            // 显示风险筛选栏和计数
+            if (riskItems.length > 0) {
+                showFilterBar();
+                updateRiskCountBadge(riskItems.length);
+            }
+            // 如果没有风险, 显示优化后的空状态
             if (info.risk_count === 0) {
                 const risksContainer = document.getElementById('risksContent');
                 if (risksContainer && risksContainer.innerHTML.trim() === '') {
-                    risksContainer.innerHTML = '<div class="no-risks">✅ 未发现需要关注的风险代码</div>';
+                    risksContainer.innerHTML = '<div class="no-risks"><span class="no-risks-icon">✅</span><strong>未发现需要关注的风险代码</strong>本次变更的代码质量良好</div>';
                 }
             }
             // 2秒后隐藏进度条
@@ -384,6 +401,15 @@ function appendRiskItem(risk, index) {
     `;
 
     container.insertAdjacentHTML('beforeend', itemHtml);
+
+    // 高亮新插入的代码块
+    const newItem = container.querySelector(`.risk-item[data-index="${index}"]`);
+    if (newItem) {
+        const codeBlock = newItem.querySelector('.risk-code');
+        if (codeBlock && window.hljs) {
+            hljs.highlightElement(codeBlock);
+        }
+    }
 }
 
 /**
@@ -496,11 +522,30 @@ function setLoading(isLoading) {
 function showStatus(message, type) {
     statusSection.style.display = '';
     statusContent.className = `status-card status-${type}`;
-    statusContent.textContent = message;
+
+    if (type === 'error') {
+        // 错误状态附带重试按钮
+        statusContent.innerHTML = `
+            <span>${escapeHtml(message)}</span>
+            <button class="btn-retry" onclick="handleRetry()">🔄 重试</button>
+        `;
+    } else {
+        statusContent.textContent = message;
+    }
+}
+
+/**
+ * 重试最后一次分析
+ */
+function handleRetry() {
+    hideStatus();
+    handleAnalyze();
 }
 
 function hideStatus() {
     statusSection.style.display = 'none';
+    // 清理 retry 按钮的 innerHTML, 防止下次 textContent 不生效
+    statusContent.innerHTML = '';
 }
 
 function hideResult() {
@@ -519,6 +564,89 @@ function escapeHtml(str) {
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
+}
+
+// ──────────────────────────────────────────────
+// 风险筛选栏
+// ──────────────────────────────────────────────
+
+/**
+ * 显示筛选栏并绑定事件
+ */
+function showFilterBar() {
+    riskFilterBar.style.display = '';
+    riskCountBadge.style.display = '';
+    // 绑定筛选按钮点击事件 (只绑一次)
+    if (!riskFilterBar.dataset.bound) {
+        riskFilterBar.querySelectorAll('.filter-tag').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const filter = btn.dataset.filter;
+                currentFilter = filter;
+                // 更新 active 样式
+                riskFilterBar.querySelectorAll('.filter-tag').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                // 应用筛选
+                applyFilter(filter);
+            });
+        });
+        riskFilterBar.dataset.bound = '1';
+    }
+}
+
+/**
+ * 更新风险计数徽章
+ * @param {number} count - 风险总数
+ */
+function updateRiskCountBadge(count) {
+    riskCountBadge.textContent = `${count} 个风险`;
+    riskCountBadge.style.display = '';
+}
+
+/**
+ * 重置筛选栏 (新一轮分析时调用)
+ */
+function resetFilterBar() {
+    riskFilterBar.style.display = 'none';
+    riskCountBadge.style.display = 'none';
+    currentFilter = 'all';
+    // 重置按钮 active
+    riskFilterBar.querySelectorAll('.filter-tag').forEach(b => b.classList.remove('active'));
+    const allBtn = riskFilterBar.querySelector('[data-filter="all"]');
+    if (allBtn) allBtn.classList.add('active');
+    riskFilterBar.dataset.bound = '';
+}
+
+/**
+ * 按分类筛选风险项
+ *
+ * 显示/隐藏 DOM 中的风险卡片, 统计匹配数量。
+ * 同时更新筛选栏中每个按钮的计数。
+ *
+ * @param {string} filter - 'all' | '安全' | '性能' | '逻辑' | '稳定性' | '规范'
+ */
+function applyFilter(filter) {
+    const items = document.querySelectorAll('.risk-item');
+    let visibleCount = 0;
+    let totalCount = items.length;
+
+    items.forEach(item => {
+        const categoryEl = item.querySelector('.risk-category');
+        const category = categoryEl ? categoryEl.textContent.trim() : '';
+
+        if (filter === 'all' || category === filter) {
+            item.classList.remove('filtered-out');
+            visibleCount++;
+        } else {
+            item.classList.add('filtered-out');
+        }
+    });
+
+    // 更新帮助文字的统计
+    if (filter === 'all') {
+        updateRiskCountBadge(totalCount);
+    } else {
+        riskCountBadge.textContent = `${filter} · ${visibleCount}/${totalCount}`;
+    }
 }
 
 // ── 初始化 ──

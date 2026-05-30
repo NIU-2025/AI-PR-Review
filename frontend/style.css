@@ -334,9 +334,6 @@ body {
 /* ── Risk Items ── */
 
 .risk-item {
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    margin-bottom: 12px;
     overflow: hidden;
 }
 
@@ -448,9 +445,155 @@ body {
 
 .no-risks {
     text-align: center;
-    padding: 24px;
-    color: var(--color-success);
+    padding: 36px 24px;
+    color: var(--color-text-secondary);
     font-size: 15px;
+    line-height: 1.8;
+}
+
+.no-risks-icon {
+    display: block;
+    font-size: 48px;
+    margin-bottom: 12px;
+}
+
+.no-risks strong {
+    display: block;
+    font-size: 17px;
+    color: var(--color-success);
+    margin-bottom: 6px;
+}
+
+/* ── Card title row ── */
+
+.card-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+}
+
+.card-title-row .card-title {
+    margin-bottom: 0;
+}
+
+.risk-count-badge {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 3px 10px;
+    background: rgba(248, 81, 73, 0.15);
+    border: 1px solid rgba(248, 81, 73, 0.2);
+    border-radius: 20px;
+    color: var(--color-danger);
+}
+
+/* ── Risk filter bar ── */
+
+.risk-filter-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 16px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--color-border);
+}
+
+.filter-tag {
+    font-size: 12px;
+    padding: 4px 12px;
+    border: 1px solid var(--color-border);
+    border-radius: 20px;
+    background: transparent;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    font-family: inherit;
+}
+
+.filter-tag:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+}
+
+.filter-tag.active {
+    background: rgba(88, 166, 255, 0.12);
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+}
+
+.filter-tag.hidden {
+    display: none;
+}
+
+/* ── Risk entrance animation ── */
+
+.risk-item {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    margin-bottom: 12px;
+    overflow: hidden;
+    animation: riskFadeIn 0.3s ease-out;
+}
+
+.risk-item.filtered-out {
+    display: none;
+}
+
+@keyframes riskFadeIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+/* P0 风险默认展开 */
+.risk-item.severity-P0 .risk-body {
+    display: block;
+}
+
+/* ── Highlight.js 代码块适配 ── */
+
+.risk-code {
+    padding: 0;
+    background: #0d1117;
+    border-radius: var(--radius);
+    font-size: 12px;
+    font-family: "SF Mono", "Fira Code", monospace;
+    overflow-x: auto;
+    line-height: 1.5;
+    border: 1px solid var(--color-border);
+}
+
+/* diff 高亮配色覆盖 (与 GitHub Dark 主题融合) */
+.risk-code code.hljs {
+    padding: 10px 14px;
+    background: transparent;
+}
+
+/* ── Retry button ── */
+
+.status-card.status-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.btn-retry {
+    padding: 6px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    border: 1px solid var(--color-primary);
+    border-radius: var(--radius);
+    background: rgba(88, 166, 255, 0.1);
+    color: var(--color-primary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    font-family: inherit;
+    white-space: nowrap;
+}
+
+.btn-retry:hover {
+    background: rgba(88, 166, 255, 0.2);
 }
 
 /* ── Meta ── */
