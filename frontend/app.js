@@ -2,9 +2,9 @@
  * AI PR Review - 前端交互逻辑
  *
  * 核心功能:
- * - 提交 PR URL 到后端 /api/review
- * - 轮询或等待分析结果
- * - 渲染结构化的 Review 报告
+ * - 提交 PR URL 到后端 /api/review/stream (SSE 流式分析)
+ * - 渐进渲染: 先出总结 → 逐个出风险 → 最后出元信息
+ * - 进度条 + 实时状态文字
  * - 错误处理与 loading 状态
  */
 
@@ -18,7 +18,18 @@ const btnText = analyzeBtn.querySelector('.btn-text');
 const btnLoading = analyzeBtn.querySelector('.btn-loading');
 const statusSection = document.getElementById('statusSection');
 const statusContent = document.getElementById('statusContent');
+const progressSection = document.getElementById('progressSection');
+const progressText = document.getElementById('progressText');
+const progressBarFill = document.getElementById('progressBarFill');
+const progressSubtext = document.getElementById('progressSubtext');
 const resultSection = document.getElementById('resultSection');
+
+// 流式分析 AbortController, 用于取消分析
+let currentAbortController = null;
+
+// 收集流式到达的风险项
+let riskItems = [];
+let riskIndex = 0;
 
 // ── 事件绑定 ──
 
@@ -27,81 +38,270 @@ prUrlInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') handleAnalyze();
 });
 
-// ── 主流程 ──
+// ── 主流程: 流式分析 ──
 
 async function handleAnalyze() {
     const prUrl = prUrlInput.value.trim();
 
+    // ── 输入校验 ──
     if (!prUrl) {
         showStatus('请输入 GitHub PR URL', 'error');
         return;
     }
-
     if (!prUrl.includes('github.com') || !prUrl.includes('/pull/')) {
-        showStatus('URL 格式不正确。请使用格式: https://github.com/{owner}/{repo}/pull/{number}', 'error');
+        showStatus('URL 格式不正确。请使用: https://github.com/{owner}/{repo}/pull/{number}', 'error');
         return;
     }
 
-    // 进入 loading 状态
+    // ── 重置状态 ──
     setLoading(true);
+    hideStatus();
     hideResult();
-    showStatus('正在从 GitHub 获取 PR 数据...', 'loading');
+    resetProgress();
+    riskItems = [];
+    riskIndex = 0;
+
+    // 清空结果区域
+    document.getElementById('summaryContent').innerHTML = '';
+    document.getElementById('riskLevelContent').innerHTML = '';
+    document.getElementById('risksContent').innerHTML = '';
+    document.getElementById('metaContent').innerHTML = '';
+
+    // 显示结果卡片（内容为空, 等待流式填充）
+    resultSection.style.display = '';
+
+    // ── 创建 AbortController (支持取消) ──
+    if (currentAbortController) {
+        currentAbortController.abort();
+    }
+    currentAbortController = new AbortController();
 
     try {
-        const response = await fetch(`${API_BASE}/api/review`, {
+        const response = await fetch(`${API_BASE}/api/review/stream`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ pr_url: prUrl }),
+            signal: currentAbortController.signal,
         });
 
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
-            const detail = errorData.detail || `服务器错误 (${response.status})`;
-            throw new Error(detail);
+            throw new Error(errorData.detail || `服务器错误 (${response.status})`);
         }
 
-        const data = await response.json();
-
-        if (!data.success) {
-            throw new Error(data.error || '分析失败');
-        }
-
-        // 渲染结果
-        hideStatus();
-        renderResult(data);
-        resultSection.style.display = '';
+        // ── 读取 SSE 流 ──
+        await parseSSEStream(response);
 
     } catch (error) {
+        if (error.name === 'AbortError') {
+            console.log('分析已被取消');
+            return;
+        }
+        updateProgress(0, '', '分析失败', true);
+        progressBarFill.classList.add('done');
+        progressBarFill.style.background = 'var(--color-danger)';
         showStatus(`❌ ${error.message}`, 'error');
     } finally {
         setLoading(false);
+        currentAbortController = null;
     }
 }
 
-// ── 渲染函数 ──
+// ──────────────────────────────────────────────
+// SSE 流解析
+// ──────────────────────────────────────────────
 
-function renderResult(data) {
-    const { pr_metadata, analysis } = data;
+/**
+ * 解析 SSE 响应流
+ *
+ * 使用 ReadableStream API 逐行读取 SSE 事件,
+ * 解析 event/data 字段, 分发到对应的处理函数。
+ *
+ * SSE 格式 (每行以 \n 结尾, 事件间以 \n\n 分隔):
+ *   event: progress
+ *   data: 正在分析...
+ *
+ *   event: summary
+ *   data: {"overview": "...", ...}
+ *
+ * @param {Response} response - fetch 返回的 Response 对象
+ */
+async function parseSSEStream(response) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
 
-    renderSummary(analysis.summary);
-    renderRiskLevel(analysis.summary.risk_level);
-    renderRisks(analysis.risks);
-    renderMeta(pr_metadata, analysis);
+    let buffer = '';      // 缓冲区: 积累未完整的事件行
+    let currentEvent = ''; // 当前正在解析的事件类型
+    let currentData = '';  // 当前正在解析的数据内容
+    // 统计风险未分析的文件数量 (用于估算进度百分比)
+    let totalFiles = 0;
+    let analyzedFiles = 0;
+
+    showProgress();
+
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+
+            // 按行分割, 最后一行可能不完整, 留在 buffer 中
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+                if (line.startsWith('event: ')) {
+                    currentEvent = line.slice(7).trim();
+                } else if (line.startsWith('data: ')) {
+                    currentData = line.slice(6).trim();
+                } else if (line === '') {
+                    // 空行 = 事件结束, 处理事件
+                    if (currentEvent && currentData) {
+                        handleSSEEvent(currentEvent, currentData, {
+                            totalFiles,
+                            analyzedFiles,
+                            setAnalyzedFiles: (n) => { analyzedFiles = n; },
+                            setTotalFiles: (n) => { totalFiles = n; },
+                        });
+                    }
+                    currentEvent = '';
+                    currentData = '';
+                }
+            }
+        }
+    } finally {
+        reader.releaseLock();
+    }
 }
+
+// ──────────────────────────────────────────────
+// SSE 事件分发
+// ──────────────────────────────────────────────
+
+/**
+ * 处理单个 SSE 事件
+ *
+ * 根据事件类型, 调用对应的渲染函数:
+ * - meta:    显示 PR 元信息卡片 + 设置文件总数
+ * - progress: 更新进度条文字和百分比
+ * - summary:  渲染变更总结卡片
+ * - risk:     追加风险项
+ * - done:     完成进度条, 显示最终元信息
+ * - error:    显示错误
+ *
+ * @param {string} event - 事件类型
+ * @param {string} dataStr - JSON 字符串或纯文本
+ * @param {object} ctx - 上下文 (文件计数)
+ */
+function handleSSEEvent(event, dataStr, ctx) {
+    switch (event) {
+        case 'meta': {
+            const meta = JSON.parse(dataStr);
+            // 设置文件总数供进度条使用
+            ctx.setTotalFiles(meta.total_files);
+            // 立即展示 PR 元信息
+            renderMeta(meta, null);
+            break;
+        }
+
+        case 'progress': {
+            // 进度文字, 如 "正在分析 (3/15): src/auth.py"
+            const text = dataStr;
+            const match = text.match(/\((\d+)\/(\d+)\)/);
+            if (match) {
+                const current = parseInt(match[1], 10);
+                const total = parseInt(match[2], 10);
+                ctx.setAnalyzedFiles(current - 1); // 标注"正在分析N"时, 已完成N-1个
+                ctx.setTotalFiles(total);
+                if (total > 0) {
+                    const pct = Math.round(((current - 1) / total) * 100);
+                    updateProgress(pct, text, `已分析 ${current - 1}/${total} 个文件`);
+                } else {
+                    updateProgress(0, text, '');
+                }
+            } else if (text === '分析完成!') {
+                updateProgress(100, text, '', true);
+                progressBarFill.classList.add('done');
+            } else {
+                updateProgress(0, text, '');
+            }
+            break;
+        }
+
+        case 'summary': {
+            const summary = JSON.parse(dataStr);
+            renderSummary(summary);
+            renderRiskLevel(summary.risk_level);
+            break;
+        }
+
+        case 'risk': {
+            const risk = JSON.parse(dataStr);
+            riskItems.push(risk);
+            // 追加渲染单个风险项 (扩展最后一个)
+            appendRiskItem(risk, riskIndex);
+            riskIndex++;
+            if (ctx.totalFiles > 0 && ctx.analyzedFiles < ctx.totalFiles) {
+                const current = ctx.analyzedFiles + 1;
+                updateProgress(
+                    Math.round((current / ctx.totalFiles) * 100),
+                    `正在分析 (${current}/${ctx.totalFiles})...`,
+                    `发现 ${riskItems.length} 个风险`
+                );
+            }
+            break;
+        }
+
+        case 'done': {
+            const info = JSON.parse(dataStr);
+            // 标记进度条完成
+            updateProgress(100, '分析完成', `耗时 ${(info.duration_ms / 1000).toFixed(1)}s · ${info.tokens.toLocaleString()} tokens · ${info.risk_count} 个风险`, true);
+            progressBarFill.classList.add('done');
+            // 更新完整元信息 (token / 耗时 / 模型)
+            const metaElement = document.getElementById('metaContent');
+            if (metaElement) {
+                renderMeta(null, info);
+            }
+            // 如果没有风险, 显示"无风险"提示
+            if (info.risk_count === 0) {
+                const risksContainer = document.getElementById('risksContent');
+                if (risksContainer && risksContainer.innerHTML.trim() === '') {
+                    risksContainer.innerHTML = '<div class="no-risks">✅ 未发现需要关注的风险代码</div>';
+                }
+            }
+            // 2秒后隐藏进度条
+            setTimeout(() => {
+                progressSection.style.display = 'none';
+            }, 2000);
+            break;
+        }
+
+        case 'error': {
+            updateProgress(0, '分析出错', '', true);
+            progressBarFill.classList.add('done');
+            progressBarFill.style.background = 'var(--color-danger)';
+            showStatus(`❌ ${dataStr}`, 'error');
+            break;
+        }
+
+        default:
+            console.log('未知 SSE 事件:', event, dataStr.substring(0, 100));
+    }
+}
+
+// ──────────────────────────────────────────────
+// 渲染函数
+// ──────────────────────────────────────────────
 
 function renderSummary(summary) {
     const container = document.getElementById('summaryContent');
-    if (!summary) {
-        container.innerHTML = '<p>无法获取总结</p>';
-        return;
-    }
+    if (!summary) return;
 
     let html = '';
 
-    // 概述
     html += `<div class="summary-overview">${escapeHtml(summary.overview)}</div>`;
 
-    // 关键变更
     if (summary.key_changes && summary.key_changes.length > 0) {
         html += '<ul class="key-changes-list">';
         summary.key_changes.forEach(change => {
@@ -110,7 +310,6 @@ function renderSummary(summary) {
         html += '</ul>';
     }
 
-    // 受影响模块
     if (summary.affected_modules && summary.affected_modules.length > 0) {
         html += '<div class="modules-tags">';
         summary.affected_modules.forEach(mod => {
@@ -143,81 +342,150 @@ function renderRiskLevel(level) {
     `;
 }
 
-function renderRisks(risks) {
+/**
+ * 追加渲染单个风险项
+ *
+ * 每次 SSE 推送一个风险时, 不重新渲染整个列表,
+ * 而是在 DOM 末尾追加一个新的风险项 (增量渲染)。
+ *
+ * @param {object} risk - 风险数据
+ * @param {number} index - 全局序号
+ */
+function appendRiskItem(risk, index) {
     const container = document.getElementById('risksContent');
 
-    if (!risks || risks.length === 0) {
-        container.innerHTML = '<div class="no-risks">✅ 未发现需要关注的风险代码</div>';
+    const confidencePercent = Math.round((risk.confidence || 0) * 100);
+    const categoryLabel = risk.category || '';
+    const categoryHtml = categoryLabel
+        ? `<span class="risk-category cat-${escapeHtml(categoryLabel)}">${escapeHtml(categoryLabel)}</span>`
+        : '';
+
+    const itemHtml = `
+        <div class="risk-item severity-${risk.severity}" data-index="${index}">
+            <div class="risk-header" onclick="toggleRisk(${index})">
+                <span class="risk-severity">${risk.severity}</span>
+                ${categoryHtml}
+                <span class="risk-title">${escapeHtml(risk.title)}</span>
+                <span class="risk-file">${escapeHtml(risk.file)} ${risk.line_range ? escapeHtml(risk.line_range) : ''}</span>
+                <span class="risk-confidence">置信度 ${confidencePercent}%</span>
+            </div>
+            <div class="risk-body">
+                <p><span class="label">问题描述</span>${escapeHtml(risk.description)}</p>
+                ${risk.suggestion ? `
+                    <div class="risk-suggestion">
+                        <span class="label">改进建议</span>${escapeHtml(risk.suggestion)}
+                    </div>
+                ` : ''}
+                ${risk.code_snippet ? `
+                    <div class="risk-code">${escapeHtml(risk.code_snippet)}</div>
+                ` : ''}
+            </div>
+        </div>
+    `;
+
+    container.insertAdjacentHTML('beforeend', itemHtml);
+}
+
+/**
+ * 渲染/更新分析元信息
+ *
+ * 可以被调用两次:
+ * 1. meta 事件时: 渲染 PR 标题/作者/分支 (info 为 null)
+ * 2. done 事件时: 追加模型/token/耗时 (meta 为 null)
+ *
+ * @param {object|null} meta - PR 元信息 (meta 事件)
+ * @param {object|null} info - 分析完成信息 (done 事件)
+ */
+function renderMeta(meta, info) {
+    const container = document.getElementById('metaContent');
+
+    // 如果容器已有内容, 追加分析信息而非覆盖
+    if (container.dataset.loaded === 'true' && info) {
+        const modelEl = container.querySelector('.meta-model');
+        const tokensEl = container.querySelector('.meta-tokens');
+        const durationEl = container.querySelector('.meta-duration');
+        const riskCountEl = container.querySelector('.meta-risk-count');
+        if (modelEl) modelEl.textContent = info.model || 'N/A';
+        if (tokensEl) tokensEl.textContent = (info.tokens || 0).toLocaleString();
+        if (durationEl) durationEl.textContent = `${((info.duration_ms || 0) / 1000).toFixed(1)}s`;
+        if (riskCountEl) riskCountEl.textContent = (info.risk_count || 0).toString();
         return;
     }
 
-    let html = '';
-    risks.forEach((risk, index) => {
-        const confidencePercent = Math.round((risk.confidence || 0) * 100);
-        html += `
-            <div class="risk-item severity-${risk.severity}" data-index="${index}">
-                <div class="risk-header" onclick="toggleRisk(${index})">
-                    <span class="risk-severity">${risk.severity}</span>
-                    <span class="risk-title">${escapeHtml(risk.title)}</span>
-                    <span class="risk-file">${escapeHtml(risk.file)} ${risk.line_range ? escapeHtml(risk.line_range) : ''}</span>
-                    <span class="risk-confidence">置信度 ${confidencePercent}%</span>
-                </div>
-                <div class="risk-body">
-                    <p><span class="label">问题描述</span>${escapeHtml(risk.description)}</p>
-                    ${risk.suggestion ? `
-                        <div class="risk-suggestion">
-                            <span class="label">改进建议</span>${escapeHtml(risk.suggestion)}
-                        </div>
-                    ` : ''}
-                    ${risk.code_snippet ? `
-                        <div class="risk-code">${escapeHtml(risk.code_snippet)}</div>
-                    ` : ''}
-                </div>
-            </div>
-        `;
-    });
+    const title = meta ? meta.title : '';
+    const author = meta ? meta.author : '';
+    const headBranch = meta ? meta.head_branch : '';
+    const baseBranch = meta ? meta.base_branch : '';
+    const modelName = info ? info.model : '';
+    const tokens = info ? (info.tokens || 0) : 0;
+    const duration = info ? `${((info.duration_ms || 0) / 1000).toFixed(1)}s` : '—';
+    const riskCount = info ? (info.risk_count || 0) : 0;
 
-    container.innerHTML = html;
-}
-
-function renderMeta(metadata, analysis) {
-    const container = document.getElementById('metaContent');
-
-    const modelName = analysis ? analysis.llm_model : 'N/A';
-    const tokenUsed = analysis ? analysis.token_used : 0;
-    const duration = analysis ? `${(analysis.analysis_duration_ms / 1000).toFixed(1)}s` : 'N/A';
+    container.dataset.loaded = meta ? 'true' : 'false';
 
     container.innerHTML = `
         <div class="meta-grid">
             <div class="meta-item">
                 <div class="meta-label">PR 标题</div>
-                <div class="meta-value" style="font-size:13px;">${escapeHtml(metadata.title || 'N/A')}</div>
+                <div class="meta-value" style="font-size:13px;">${escapeHtml(title)}</div>
             </div>
             <div class="meta-item">
                 <div class="meta-label">作者</div>
-                <div class="meta-value">${escapeHtml(metadata.author || 'N/A')}</div>
+                <div class="meta-value">${escapeHtml(author)}</div>
             </div>
             <div class="meta-item">
                 <div class="meta-label">分支</div>
-                <div class="meta-value">${escapeHtml(metadata.head_branch || '')} → ${escapeHtml(metadata.base_branch || '')}</div>
+                <div class="meta-value">${escapeHtml(headBranch)} → ${escapeHtml(baseBranch)}</div>
             </div>
             <div class="meta-item">
                 <div class="meta-label">分析模型</div>
-                <div class="meta-value">${escapeHtml(modelName)}</div>
+                <div class="meta-value meta-model">${escapeHtml(modelName)}</div>
             </div>
             <div class="meta-item">
                 <div class="meta-label">Token 消耗</div>
-                <div class="meta-value">${tokenUsed.toLocaleString()}</div>
+                <div class="meta-value meta-tokens">${tokens.toLocaleString()}</div>
+            </div>
+            <div class="meta-item">
+                <div class="meta-label">风险数量</div>
+                <div class="meta-value meta-risk-count">${riskCount}</div>
             </div>
             <div class="meta-item">
                 <div class="meta-label">分析耗时</div>
-                <div class="meta-value">${duration}</div>
+                <div class="meta-value meta-duration">${duration}</div>
             </div>
         </div>
     `;
 }
 
-// ── UI 辅助 ──
+// ──────────────────────────────────────────────
+// 进度条控制
+// ──────────────────────────────────────────────
+
+function showProgress() {
+    progressSection.style.display = '';
+}
+
+function updateProgress(percent, text, subtext, isDone = false) {
+    progressBarFill.style.width = `${percent}%`;
+    if (text) progressText.textContent = text;
+    if (subtext !== undefined) progressSubtext.textContent = subtext;
+    if (isDone) {
+        progressBarFill.classList.add('done');
+    }
+}
+
+function resetProgress() {
+    progressSection.style.display = 'none';
+    progressBarFill.style.width = '0%';
+    progressBarFill.classList.remove('done');
+    progressBarFill.style.background = '';
+    progressText.textContent = '正在连接...';
+    progressSubtext.textContent = '';
+}
+
+// ──────────────────────────────────────────────
+// UI 辅助
+// ──────────────────────────────────────────────
 
 function setLoading(isLoading) {
     analyzeBtn.disabled = isLoading;
@@ -255,4 +523,4 @@ function escapeHtml(str) {
 
 // ── 初始化 ──
 
-console.log('AI PR Review 前端已就绪');
+console.log('AI PR Review 前端已就绪 (流式版本)');

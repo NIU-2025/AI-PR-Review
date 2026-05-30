@@ -50,6 +50,20 @@
             <div id="statusContent" class="status-card"></div>
         </section>
 
+        <!-- 进度条 (流式分析时显示) -->
+        <section id="progressSection" class="progress-section" style="display:none;">
+            <div class="progress-card">
+                <div class="progress-header">
+                    <span class="progress-icon spinner-sm"></span>
+                    <span id="progressText" class="progress-text">正在连接...</span>
+                </div>
+                <div class="progress-bar-track">
+                    <div id="progressBarFill" class="progress-bar-fill" style="width:0%;"></div>
+                </div>
+                <div id="progressSubtext" class="progress-subtext"></div>
+            </div>
+        </section>
+
         <!-- 结果区域 -->
         <section id="resultSection" class="result-section" style="display:none;">
 
