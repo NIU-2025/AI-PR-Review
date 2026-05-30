@@ -8,16 +8,18 @@ Review API 路由
 
 import json
 import logging
+import sys
 import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from config import AppConfig, load_config
-from models.schemas import PRReviewRequest, PRReviewResponse
+from models.schemas import PRReviewRequest, PRReviewResponse, ChangeSummary, RiskItem, AnalysisResult
 from services.github_service import GitHubAPIError, GitHubService
 from services.llm_service import LLMService
 from utils.context_builder import ContextBuilder
+from utils.file_storage import ResultStorage
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +34,12 @@ _app_config: AppConfig | None = None
 _github_service: GitHubService | None = None
 _llm_service: LLMService | None = None
 _context_builder: ContextBuilder | None = None
+_result_storage: ResultStorage | None = None
 
 
 def _init_services():
     """延迟初始化服务实例"""
-    global _app_config, _github_service, _llm_service, _context_builder
+    global _app_config, _github_service, _llm_service, _context_builder, _result_storage
     if _app_config is None:
         _app_config = load_config()
         _github_service = GitHubService(
@@ -47,6 +50,7 @@ def _init_services():
         )
         _llm_service = LLMService(config=_app_config.llm)
         _context_builder = ContextBuilder(config=_app_config.context)
+        _result_storage = ResultStorage(config=_app_config.storage)
         logger.info("服务实例初始化完成")
 
 
@@ -65,6 +69,11 @@ def get_context_builder() -> ContextBuilder:
     return _context_builder  # type: ignore
 
 
+def get_result_storage() -> ResultStorage:
+    _init_services()
+    return _result_storage  # type: ignore
+
+
 # ──────────────────────────────────────────────
 # API 端点
 # ──────────────────────────────────────────────
@@ -81,32 +90,34 @@ async def review_pr(
     github: GitHubService = Depends(get_github_service),
     llm: LLMService = Depends(get_llm_service),
     context_builder: ContextBuilder = Depends(get_context_builder),
+    storage: ResultStorage = Depends(get_result_storage),
 ):
     """
     PR Review 核心端点
-
-    流程:
-    1. 解析 PR URL
-    2. 从 GitHub 拉取 PR 数据
-    3. 构建分析上下文
-    4. 调用 LLM 进行多阶段分析
-    5. 返回结构化 Review 结果
     """
+    print(f"[review_pr] >>> 入口, URL={request.pr_url}", flush=True)
+    logger.info(f"[review_pr] >>> 入口, URL={request.pr_url}")
     start_time = time.time()
 
     # ── Step 1: 拉取 PR 数据 ──
     try:
         pr_data = github.fetch_pr_data(request.pr_url)
+        print(f"[review_pr] Step1 OK: {pr_data.total_files} files", flush=True)
+        logger.info(f"[review_pr] Step1 OK: {pr_data.total_files} files")
     except ValueError as e:
+        print(f"[review_pr] Step1 ValueError: {e}", flush=True)
         raise HTTPException(status_code=400, detail=str(e))
     except GitHubAPIError as e:
+        print(f"[review_pr] Step1 GitHubAPIError: {e}", flush=True)
         raise HTTPException(
             status_code=e.status_code or 502,
             detail=str(e),
         )
 
     # ── Step 1.5: 空 PR 拦截 ──
-    if not context_builder.has_meaningful_changes(pr_data):
+    has_changes = context_builder.has_meaningful_changes(pr_data)
+    print(f"[review_pr] has_meaningful_changes={has_changes}", flush=True)
+    if not has_changes:
         logger.info(f"PR 无有效代码变更, 跳过分析")
         return PRReviewResponse(
             success=True,
@@ -120,6 +131,7 @@ async def review_pr(
 
     # ── Step 2: 判定分析模式 & 构建上下文 ──
     mode = context_builder.determine_mode(pr_data)
+    print(f"[review_pr] Step2 mode={mode.value}", flush=True)
 
     if mode.value == "trivial":
         context = context_builder.build_trivial_context(pr_data)
@@ -127,18 +139,45 @@ async def review_pr(
         context = context_builder.build_context(pr_data)
 
     # ── Step 3: LLM 分析 ──
-    # Day 2 升级: 非 trivial 模式使用逐文件深度分析
+    print(f"[review_pr] Step3 开始 LLM 分析...", flush=True)
     try:
         if mode.value == "trivial":
             analysis = llm.analyze(pr_data, context, mode)
         else:
             analysis = llm.analyze_per_file(pr_data, context, mode, context_builder)
+        print(f"[review_pr] Step3 OK: risks={len(analysis.risks)}, tokens={analysis.token_used}", flush=True)
     except RuntimeError as e:
+        print(f"[review_pr] Step3 RuntimeError: {e}", flush=True)
         error_msg = _friendly_error(str(e))
         raise HTTPException(status_code=502, detail=error_msg)
+    except Exception as e:
+        print(f"[review_pr] Step3 未预期异常: {type(e).__name__}: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=502, detail=f"LLM 分析异常: {e}")
 
     total_ms = int((time.time() - start_time) * 1000)
     logger.info(f"PR Review 完成, 总耗时: {total_ms}ms")
+
+    # ── 保存分析结果到本地文件 ──
+    print(f"[review_pr] Step4 准备保存, storage.enabled={storage.enabled}, dir={storage.results_dir}", flush=True)
+    logger.info(f"[review_pr] Step4 准备保存: enabled={storage.enabled}, dir={storage.results_dir}")
+    try:
+        saved_path = storage.save_result(
+            pr_url=request.pr_url,
+            analysis=analysis,
+            pr_metadata=pr_data.metadata,
+            llm_model=llm.model,
+            token_used=analysis.token_used,
+            duration_ms=total_ms,
+        )
+        print(f"[review_pr] Step4 保存完成: {saved_path}", flush=True)
+        logger.info(f"[review_pr] Step4 保存完成: {saved_path}")
+    except Exception as e:
+        import traceback
+        print(f"[review_pr] Step4 保存异常: {e}", flush=True)
+        traceback.print_exc()
+        logger.error(f"[review_pr] Step4 保存异常: {e}", exc_info=True)
 
     return PRReviewResponse(
         success=True,
@@ -158,6 +197,7 @@ async def review_pr_stream(
     github: GitHubService = Depends(get_github_service),
     llm: LLMService = Depends(get_llm_service),
     context_builder: ContextBuilder = Depends(get_context_builder),
+    storage: ResultStorage = Depends(get_result_storage),
 ):
     """
     PR Review 流式端点 (SSE)
@@ -269,14 +309,62 @@ async def review_pr_stream(
                         "risk_level": analysis.summary.risk_level,
                     },
                 )
+
+                # ── 保存分析结果到本地文件 ──
+                storage.save_result(
+                    pr_url=request.pr_url,
+                    analysis=analysis,
+                    pr_metadata=pr_data.metadata,
+                    llm_model=llm.model,
+                    token_used=analysis.token_used,
+                    duration_ms=analysis.analysis_duration_ms,
+                )
             else:
-                # 逐文件分析 + 流式推送
+                # 逐文件分析 + 流式推送 → 流结束后统一保存
+                captured_summary = None
+                captured_risks = []
+                captured_done = None
+
                 for event_dict in llm.analyze_per_file_stream(
                     pr_data, context, mode, context_builder
                 ):
-                    yield _format_sse(
-                        event_dict["event"], event_dict["data"]
-                    )
+                    if event_dict["event"] == "summary":
+                        captured_summary = event_dict["data"]
+                    elif event_dict["event"] == "risk":
+                        captured_risks.append(event_dict["data"])
+                    elif event_dict["event"] == "done":
+                        captured_done = event_dict["data"]
+                    yield _format_sse(event_dict["event"], event_dict["data"])
+
+                # 流全部推送完毕后, 重建 AnalysisResult 并保存
+                if captured_summary is not None and captured_done is not None:
+                    try:
+                        summary_obj = ChangeSummary(**captured_summary)
+                        risk_objs = [RiskItem(**r) for r in captured_risks]
+                        analysis_result = AnalysisResult(
+                            summary=summary_obj,
+                            risks=risk_objs,
+                            llm_model=captured_done.get("model", llm.model),
+                            token_used=captured_done.get("tokens", 0),
+                            analysis_duration_ms=captured_done.get("duration_ms", 0),
+                        )
+                        print(f"[sse_stream] 流式分析完成, 正在保存结果...", flush=True)
+                        logger.info(f"[sse_stream] 流式分析完成, 正在保存结果: risks={len(risk_objs)}, tokens={analysis_result.token_used}")
+                        saved = storage.save_result(
+                            pr_url=request.pr_url,
+                            analysis=analysis_result,
+                            pr_metadata=pr_data.metadata,
+                            llm_model=analysis_result.llm_model,
+                            token_used=analysis_result.token_used,
+                            duration_ms=analysis_result.analysis_duration_ms,
+                        )
+                        print(f"[sse_stream] 保存完成: {saved}", flush=True)
+                        logger.info(f"[sse_stream] 保存完成: {saved}")
+                    except Exception as e:
+                        import traceback
+                        print(f"[sse_stream] 保存异常: {e}", flush=True)
+                        traceback.print_exc()
+                        logger.error(f"[sse_stream] 保存异常: {e}", exc_info=True)
 
         except RuntimeError as e:
             logger.error(f"SSE 流分析失败: {e}")
