@@ -63,6 +63,8 @@ class GitHubService:
         self.timeout = timeout
         self.max_retries = max_retries
 
+        self._pr_etag = ""
+
         headers = {
             "Accept": "application/vnd.github.v3+json",
             "User-Agent": "AI-PR-Review/1.0",
@@ -155,7 +157,12 @@ class GitHubService:
         GET /repos/{owner}/{repo}/pulls/{pull_number}
         """
         url = f"{self.base_url}/repos/{owner}/{repo}/pulls/{pr_number}"
-        data = self._request_with_retry("GET", url)
+        data, response = self._request_with_retry("GET", url)
+
+        etag = response.headers.get("ETag", "")
+        if etag:
+            self._pr_etag = etag
+            print(f"[github] 捕获 PR #{pr_number} 元数据 ETag: {etag[:50]}...", flush=True)
 
         return PRMetadata(
             title=data.get("title", ""),
@@ -185,7 +192,7 @@ class GitHubService:
 
         while page <= max_pages:
             params = {"per_page": 100, "page": page}
-            data = self._request_with_retry("GET", url, params=params)
+            data, _response = self._request_with_retry("GET", url, params=params)
 
             if not isinstance(data, list) or len(data) == 0:
                 break
@@ -224,7 +231,8 @@ class GitHubService:
         method: str,
         url: str,
         params: Optional[dict] = None,
-    ) -> dict | list:
+        extra_headers: Optional[dict] = None,
+    ) -> "tuple[dict | list, httpx.Response]":
         """
         带重试的 HTTP 请求
 
@@ -232,9 +240,10 @@ class GitHubService:
             method: HTTP 方法
             url: 请求 URL
             params: 查询参数
+            extra_headers: 额外请求头 (如 If-None-Match)
 
         Returns:
-            解析后的 JSON 数据
+            (解析后的 JSON 数据, httpx.Response 对象)
 
         Raises:
             GitHubAPIError: 请求失败
@@ -243,7 +252,12 @@ class GitHubService:
 
         for attempt in range(1, self.max_retries + 1):
             try:
-                response = self._client.request(method, url, params=params)
+                if extra_headers:
+                    response = self._client.request(
+                        method, url, params=params, headers=extra_headers
+                    )
+                else:
+                    response = self._client.request(method, url, params=params)
 
                 # 处理 rate limit
                 if response.status_code == 403:
@@ -276,7 +290,7 @@ class GitHubService:
                         status_code=response.status_code,
                     )
 
-                return response.json()
+                return response.json(), response
 
             except GitHubAPIError:
                 raise
@@ -295,6 +309,52 @@ class GitHubService:
         raise GitHubAPIError(
             f"请求失败, 已重试 {self.max_retries} 次: {last_error}"
         )
+
+    @property
+    def last_etag(self) -> str:
+        """最近一次 fetch_pr_data 获取到的 PR 元数据端点 ETag (用于缓存校验)"""
+        return self._pr_etag
+
+    def check_pr_updated(
+        self, owner: str, repo: str, pr_number: int, etag: str
+    ) -> "tuple[bool, str]":
+        """
+        用 If-None-Match 头检查 PR 是否自上次缓存后发生变更
+
+        向 GitHub API 发送轻量校验请求:
+        - 若 PR 未变更 → GitHub 返回 304 Not Modified (不计入 Rate Limit)
+        - 若 PR 已变更 → GitHub 返回 200 + 新 ETag
+        """
+        url = f"{self.base_url}/repos/{owner}/{repo}/pulls/{pr_number}"
+
+        try:
+            response = self._client.request(
+                "GET", url, headers={"If-None-Match": etag}
+            )
+
+            if response.status_code == 304:
+                logger.info(f"PR #{pr_number} 缓存验证通过: 304 Not Modified")
+                print(f"[github] PR #{pr_number} 缓存验证通过: 304 Not Modified", flush=True)
+                return True, ""
+
+            if response.status_code == 200:
+                new_etag = response.headers.get("ETag", "")
+                logger.info(f"PR #{pr_number} 已更新, 新 ETag={new_etag}")
+                print(f"[github] PR #{pr_number} 已变更: HTTP 200, 新 ETag={new_etag[:50]}...", flush=True)
+                return False, new_etag
+
+            if response.status_code == 404:
+                raise GitHubAPIError(
+                    f"PR 不存在或无权限访问: {url}",
+                    status_code=404,
+                )
+
+            logger.warning(f"PR #{pr_number} 缓存校验异常: HTTP {response.status_code}")
+            return False, ""
+
+        except httpx.TimeoutException:
+            logger.warning(f"PR #{pr_number} 缓存校验超时, 降级为重新分析")
+            return False, ""
 
     def close(self):
         """关闭 HTTP 客户端"""
