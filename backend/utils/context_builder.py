@@ -123,6 +123,30 @@ class ContextBuilder:
         )
         return mode
 
+    def has_meaningful_changes(self, pr_data: PRData) -> bool:
+        """
+        检查 PR 是否包含有分析价值的代码变更
+
+        无意义变更的场景:
+        - 所有文件都没有 diff patch (纯二进制/图片变更或空 PR)
+        - files 列表为空
+        - 所有文件 patch 均为空白
+
+        Args:
+            pr_data: PR 数据
+
+        Returns:
+            True = 有可分析的代码变更, False = 无需分析的空 PR
+        """
+        if not pr_data.files or pr_data.total_files == 0:
+            return False
+
+        files_with_patch = [
+            f for f in pr_data.files
+            if f.patch and len(f.patch.strip()) > 0
+        ]
+        return len(files_with_patch) > 0
+
     def build_context(self, pr_data: PRData) -> str:
         """
         构建 LLM 分析用的上下文文本

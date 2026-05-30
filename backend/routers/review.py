@@ -105,6 +105,19 @@ async def review_pr(
             detail=str(e),
         )
 
+    # ── Step 1.5: 空 PR 拦截 ──
+    if not context_builder.has_meaningful_changes(pr_data):
+        logger.info(f"PR 无有效代码变更, 跳过分析")
+        return PRReviewResponse(
+            success=True,
+            pr_url=request.pr_url,
+            pr_metadata=pr_data.metadata,
+            analysis=None,
+            error=(
+                "该 PR 不包含有效的代码变更（可能仅包含二进制文件、图片或空文件变更），无需分析。"
+            ),
+        )
+
     # ── Step 2: 判定分析模式 & 构建上下文 ──
     mode = context_builder.determine_mode(pr_data)
 
@@ -121,7 +134,8 @@ async def review_pr(
         else:
             analysis = llm.analyze_per_file(pr_data, context, mode, context_builder)
     except RuntimeError as e:
-        raise HTTPException(status_code=502, detail=f"LLM 分析失败: {e}")
+        error_msg = _friendly_error(str(e))
+        raise HTTPException(status_code=502, detail=error_msg)
 
     total_ms = int((time.time() - start_time) * 1000)
     logger.info(f"PR Review 完成, 总耗时: {total_ms}ms")
@@ -177,6 +191,35 @@ async def review_pr_stream(
         raise HTTPException(
             status_code=e.status_code or 502,
             detail=str(e),
+        )
+
+    # ── Step 1.5: 空 PR 拦截 ──
+    if not context_builder.has_meaningful_changes(pr_data):
+        logger.info(f"流式端点: PR 无有效代码变更, 跳过分析")
+
+        async def empty_pr_generator():
+            yield _format_sse("meta", {
+                "title": pr_data.metadata.title,
+                "author": pr_data.metadata.author,
+                "base_branch": pr_data.metadata.base_branch,
+                "head_branch": pr_data.metadata.head_branch,
+                "total_files": pr_data.total_files,
+                "total_additions": pr_data.total_additions,
+                "total_deletions": pr_data.total_deletions,
+            })
+            yield _format_sse("progress", "该 PR 不包含有效的代码变更（可能仅包含二进制文件、图片或空文件变更），无需分析。")
+            yield _format_sse("done", {
+                "model": "",
+                "tokens": 0,
+                "duration_ms": 0,
+                "risk_count": 0,
+                "risk_level": "trivial",
+            })
+
+        return StreamingResponse(
+            empty_pr_generator(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
         )
 
     # ── Step 2: 判定分析模式 & 构建上下文 ──
@@ -237,10 +280,10 @@ async def review_pr_stream(
 
         except RuntimeError as e:
             logger.error(f"SSE 流分析失败: {e}")
-            yield _format_sse("error", str(e))
+            yield _format_sse("error", _friendly_error(str(e)))
         except Exception as e:
             logger.error(f"SSE 流分析异常: {e}", exc_info=True)
-            yield _format_sse("error", f"分析异常: {e}")
+            yield _format_sse("error", f"系统内部异常: {e}")
 
     return StreamingResponse(
         sse_event_generator(),
@@ -251,6 +294,55 @@ async def review_pr_stream(
             "X-Accel-Buffering": "no",  # 禁用 Nginx 缓冲
         },
     )
+
+
+def _friendly_error(raw_error: str) -> str:
+    """
+    将底层技术错误转换为用户友好的中文提示
+
+    处理常见的 LLM API 错误:
+    - Connection error → 网络/API 地址配置问题
+    - Authentication error → API Key 错误
+    - Rate limit → 速率限制
+    - Timeout → 超时
+
+    Args:
+        raw_error: 原始错误字符串
+
+    Returns:
+        友好的中文错误提示
+    """
+    error_lower = raw_error.lower()
+
+    if "connection" in error_lower or "connect" in error_lower:
+        return (
+            "无法连接到 LLM API 服务。"
+            "请检查: 1) 网络连接是否正常 "
+            "2) .env 中的 LLM_API_BASE 地址是否正确 "
+            "3) API 服务是否可用"
+        )
+    if "auth" in error_lower or "401" in raw_error or "unauthorized" in error_lower:
+        return (
+            "LLM API 认证失败。"
+            "请检查 .env 中的 LLM_API_KEY 是否正确且未过期"
+        )
+    if "rate" in error_lower or "429" in raw_error or "limit" in error_lower:
+        return (
+            "LLM API 调用次数已达上限。"
+            "请稍后重试或更换 API Key"
+        )
+    if "timeout" in error_lower or "timed out" in error_lower:
+        return (
+            "LLM API 响应超时。"
+            "PR 文件较多或网络较慢时可能出现，请稍后重试"
+        )
+    if "404" in raw_error:
+        return (
+            "LLM API 端点不存在。"
+            "请检查 .env 中的 LLM_API_BASE 和 LLM_MODEL 是否正确"
+        )
+
+    return f"LLM 分析失败: {raw_error}"
 
 
 def _format_sse(event: str, data) -> str:
