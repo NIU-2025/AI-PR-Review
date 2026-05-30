@@ -431,24 +431,184 @@ class ContextBuilder:
 
         # ── 代码 diff ──
         patch = file_change.patch
-        # 单文件上下文 token 预算: ~8K chars
-        max_patch_chars = 24000
-        if len(patch) > max_patch_chars:
-            patch = patch[:max_patch_chars]
-            patch += "\n...(文件过大, diff 已截断)"
+        chunked_diffs = self._split_diff_by_hunks(patch, 24000)
 
-        parts.append(
-            f"### 代码变更 (unified diff)\n"
-            f"```diff\n{patch}\n```"
-        )
+        if len(chunked_diffs) == 1:
+            # 单块: 不需要分块标注
+            parts.append(
+                f"### 代码变更 (unified diff)\n"
+                f"```diff\n{chunked_diffs[0]}\n```"
+            )
+        else:
+            # 多块: 只放第一块到当前上下文, 剩余的由调用方循环处理
+            parts.append(
+                f"### 代码变更 (unified diff) [第 1/{len(chunked_diffs)} 块]\n"
+                f"```diff\n{chunked_diffs[0]}\n```"
+            )
 
         context = "\n\n".join(parts)
-        logger.debug(
-            f"文件上下文构建完成: {file_change.filename} "
-            f"({len(context)} chars, 约 {self._estimate_tokens(context)} tokens)"
+        return context
+
+    def build_chunked_file_contexts(
+        self,
+        file_change: FileChange,
+        pr_data: PRData,
+        cross_file_hints: dict[str, list[str]] | None = None,
+    ) -> list[str]:
+        """
+        为单个文件构建分块分析上下文列表 (Day 3 方案A: Sliding Window)
+
+        当文件 diff 超过 24000 字符时, 按 @@ hunk 边界分块,
+        每块独立构建上下文, LLM 依次分析每一块。
+
+        与 build_file_context() 的区别:
+        - build_file_context: 返回单个字符串, diff 太大时截断
+        - build_chunked_file_contexts: 返回 list[str], 按 hunk 边界分块不截断
+
+        Args:
+            file_change: 目标文件的变更信息
+            pr_data: PR 整体数据
+            cross_file_hints: 跨文件依赖提示
+
+        Returns:
+            分块后的上下文列表, 长度 = 1 表示无需分块
+        """
+        chunked_diffs = self._split_diff_by_hunks(file_change.patch, 24000)
+
+        if len(chunked_diffs) == 1:
+            return [self.build_file_context(file_change, pr_data, cross_file_hints)]
+
+        # ── 构建分块上下文 ──
+        total_chunks = len(chunked_diffs)
+        chunk_contexts: list[str] = []
+
+        # 构建复用的头部 (文件标识 + PR 元信息 + 跨文件提示)
+        header_parts: list[str] = []
+        header_parts.append(
+            f"## 分析文件: `{file_change.filename}` "
+            f"({file_change.status}, +{file_change.additions} -{file_change.deletions})"
+        )
+        meta = pr_data.metadata
+        header_parts.append(
+            f"### PR 上下文\n"
+            f"- 标题: {meta.title}\n"
+            f"- 作者: {meta.author}\n"
+            f"- 分支: {meta.head_branch} → {meta.base_branch}\n"
+            f"- 总文件数: {pr_data.total_files} (+{pr_data.total_additions} -{pr_data.total_deletions})"
+        )
+        if cross_file_hints and file_change.filename in cross_file_hints:
+            hints = cross_file_hints[file_change.filename]
+            hints_text = "\n".join(f"- {h}" for h in hints)
+            header_parts.append(
+                f"### ⚠️ 关联文件变更提示\n{hints_text}"
+            )
+        header_text = "\n\n".join(header_parts)
+
+        for i, diff_chunk in enumerate(chunked_diffs):
+            chunk_text = (
+                f"{header_text}\n\n"
+                f"### 代码变更 (unified diff) [第 {i + 1}/{total_chunks} 块]\n"
+                f"```diff\n{diff_chunk}\n```"
+            )
+            chunk_contexts.append(chunk_text)
+            logger.debug(
+                f"文件 {file_change.filename} 分块 [{i + 1}/{total_chunks}]: "
+                f"{len(diff_chunk)} chars"
+            )
+
+        logger.info(
+            f"文件 {file_change.filename} 拆分为 {total_chunks} 个分析块 "
+            f"(总 diff {len(file_change.patch)} chars)"
         )
 
-        return context
+        return chunk_contexts
+
+    def _split_diff_by_hunks(
+        self, patch: str, max_chars: int
+    ) -> list[str]:
+        """
+        按 unified diff 的 @@ hunk 边界安全分块
+
+        核心策略:
+        1. 优先按 @@ 行切分 (每个 @@ 是一个语义边界, 通常对应一个函数/类)
+        2. 每个块不超过 max_chars
+        3. 如果单个 hunk 超过 max_chars, 回退到字符级截断 (极端情况)
+        4. 块间有少量重叠 (前一块最后 2 行 = 后一块开头, 提供上下文)
+
+        为什么按 @@ 切而不是按字符切:
+        - @@ 行标记了变更位置: "@@ -10,5 +10,15 @@ def get_users():"
+        - 一个 hunk 通常是一个完整的功能变更
+        - 按 @@ 切不会把 SQL 注入代码从中截断
+
+        示例:
+          输入: 40000 字符的 diff, max_chars=24000
+          输出: ["@@ hunk1 + hunk2 (22000 chars)", "@@ hunk3 + hunk4 (18000 chars)"]
+
+        Args:
+            patch: unified diff 原始文本
+            max_chars: 单块最大字符数
+
+        Returns:
+            分块后的 diff 片段列表
+        """
+        if not patch or len(patch) <= max_chars:
+            return [patch]
+
+        # ── 按行分割 diff ──
+        lines = patch.split("\n")
+        # 找到所有 @@ 行的索引位置
+        hunk_boundaries = [
+            i for i, line in enumerate(lines)
+            if line.startswith("@@")
+        ]
+
+        # 如果没有 @@ 标记 (非标准 diff), 回退到字符截断
+        if not hunk_boundaries:
+            logger.warning("diff 无 @@ 标记, 回退到字符截断")
+            return [patch[:max_chars]]
+
+        # ── 按 @@ 边界分组 ──
+        # 每个 hunk 块从 @@ 行开始, 到下一个 @@ 行之前结束
+        chunks: list[str] = []
+        current_chunk_lines: list[str] = []
+        current_chunk_chars = 0
+
+        for i, boundary_idx in enumerate(hunk_boundaries):
+            # 当前 hunk 的行范围
+            start = boundary_idx
+            end = hunk_boundaries[i + 1] if i + 1 < len(hunk_boundaries) else len(lines)
+            hunk_lines = lines[start:end]
+            hunk_chars = sum(len(l) + 1 for l in hunk_lines)  # +1 for \n
+
+            # ── 判断是否需要新建块 ──
+            if current_chunk_chars + hunk_chars > max_chars and current_chunk_lines:
+                # 当前块已满, 保存并开始新块
+                chunks.append("\n".join(current_chunk_lines))
+                # 新块重叠: 复用当前块最后 2 行作为上下文
+                overlap = current_chunk_lines[-2:] if len(current_chunk_lines) >= 2 else []
+                current_chunk_lines = overlap.copy()
+                current_chunk_chars = sum(len(l) + 1 for l in current_chunk_lines)
+
+            current_chunk_lines.extend(hunk_lines)
+            current_chunk_chars += hunk_chars
+
+        # ── 保存最后一块 ──
+        if current_chunk_lines:
+            chunks.append("\n".join(current_chunk_lines))
+
+        # ── 单个 hunk 超过 max_chars 的极端情况 ──
+        # 回退到在 max_chars 处截断
+        final_chunks: list[str] = []
+        for chunk in chunks:
+            if len(chunk) <= max_chars:
+                final_chunks.append(chunk)
+            else:
+                logger.warning(
+                    f"单个 hunk 超过 {max_chars} chars ({len(chunk)}), 回退到字符截断"
+                )
+                final_chunks.append(chunk[:max_chars])
+
+        return final_chunks if final_chunks else [patch[:max_chars]]
 
     def extract_cross_file_dependencies(
         self, files: list[FileChange]

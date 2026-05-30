@@ -463,26 +463,29 @@ class LLMService:
                     f"{file_change.filename}"
                 )
 
-                file_context = context_builder.build_file_context(
+                file_contexts = context_builder.build_chunked_file_contexts(
                     file_change, pr_data, cross_hints
                 )
 
                 try:
-                    file_risks = self._analyze_single_file(file_change, file_context)
+                    file_risks = self._analyze_single_file(file_change, file_contexts)
+                    yielded_from_file = 0
                     for risk in file_risks:
-                        # 单个风险立即推送, 前端可以逐个展示
-                        yield {"event": "risk", "data": risk.model_dump()}
+                        # 推送前先过滤: 只 yield 符合当前模式的 risk
+                        if self._should_include_risk(risk, mode):
+                            yield {"event": "risk", "data": risk.model_dump()}
+                            yielded_from_file += 1
                     all_risks.extend(file_risks)
-                    if file_risks:
+                    if yielded_from_file > 0:
                         logger.info(
-                            f"  {file_change.filename}: +{len(file_risks)} 个风险"
+                            f"  {file_change.filename}: +{yielded_from_file} 个风险 (原始 {len(file_risks)})"
                         )
                 except Exception as e:
                     logger.warning(
                         f"文件 {file_change.filename} 分析失败, 跳过: {e}"
                     )
 
-            # ── 最终过滤 ──
+            # ── 最终过滤与合并 ──
             all_risks = self._filter_by_mode(all_risks, mode)
             all_risks = self._deduplicate_risks(all_risks)
             all_risks = all_risks[:10]
@@ -576,14 +579,14 @@ class LLMService:
                 f"分析文件 [{idx + 1}/{file_count}]: {file_change.filename}"
             )
 
-            # 构建文件级上下文
-            file_context = context_builder.build_file_context(
+            # 构建文件级上下文 (支持分块)
+            file_contexts = context_builder.build_chunked_file_contexts(
                 file_change, pr_data, cross_hints
             )
 
-            # 调用 LLM 分析
+            # 调用 LLM 分析 (传入上下文列表, 支持分块多轮)
             try:
-                file_risks = self._analyze_single_file(file_change, file_context)
+                file_risks = self._analyze_single_file(file_change, file_contexts)
                 all_risks.extend(file_risks)
                 analyzed_count += 1
                 if file_risks:
@@ -610,60 +613,86 @@ class LLMService:
         return all_risks
 
     def _analyze_single_file(
-        self, file_change: FileChange, file_context: str
+        self, file_change: FileChange, file_contexts: list[str]
     ) -> list[RiskItem]:
         """
-        分析单个文件的变更风险
+        分析单个文件的变更风险 (支持分块多轮调用)
 
-        调用 LLM 对单个文件的上下文进行分析, 并解析返回的风险列表。
-        此方法被 _run_per_file_risk_stage 循环调用。
+        当文件 diff 过大时, context_builder 会将 diff 按 @@ hunk 边界分块,
+        每个块独立调用 LLM, 所有块的风险汇总返回。
 
         Args:
             file_change: 文件变更信息
-            file_context: 该文件的独立分析上下文
+            file_contexts: 该文件的独立分析上下文列表 (1 个或 N 个)
 
         Returns:
-            该文件的风险项列表
+            该文件的汇总风险项列表
         """
-        user_prompt = (
-            f"请审查以下文件中新增/修改的代码是否存在风险:\n\n"
-            f"{file_context}"
-        )
+        all_risks: list[RiskItem] = []
+        is_chunked = len(file_contexts) > 1
 
-        raw_output = self._call_llm(SYSTEM_PROMPT_PER_FILE_RISK, user_prompt)
-        parsed = self._safe_json_parse(raw_output)
-        raw_risks = parsed.get("risks", [])
-
-        if not isinstance(raw_risks, list):
-            logger.warning(
-                f"{file_change.filename}: 风险识别返回格式异常, 已忽略"
+        if is_chunked:
+            logger.info(
+                f"{file_change.filename}: 分块分析, 共 {len(file_contexts)} 块"
             )
-            return []
 
-        risks = []
-        for item in raw_risks:
-            try:
-                risk = RiskItem(
-                    severity=item.get("severity", "P3"),
-                    category=item.get("category", ""),
-                    # 强制使用当前文件的路径, 避免 LLM 返回错误的文件路径
-                    file=file_change.filename,
-                    line_range=item.get("line_range", ""),
-                    title=item.get("title", ""),
-                    description=item.get("description", ""),
-                    suggestion=item.get("suggestion", ""),
-                    code_snippet=item.get("code_snippet", ""),
-                    confidence=float(item.get("confidence", 0.5)),
+        for idx, context in enumerate(file_contexts):
+            # 分块时给 LLM 额外提示
+            if is_chunked:
+                chunk_hint = (
+                    f"（这是该文件的第 {idx + 1}/{len(file_contexts)} 块分析, "
+                    f"请只关注本块中的代码变更）"
                 )
-                risks.append(risk)
-            except Exception as e:
+                user_prompt = (
+                    f"请审查以下文件中新增/修改的代码是否存在风险:\n\n"
+                    f"{chunk_hint}\n\n"
+                    f"{context}"
+                )
+            else:
+                user_prompt = (
+                    f"请审查以下文件中新增/修改的代码是否存在风险:\n\n"
+                    f"{context}"
+                )
+
+            raw_output = self._call_llm(SYSTEM_PROMPT_PER_FILE_RISK, user_prompt)
+            parsed = self._safe_json_parse(raw_output)
+            raw_risks = parsed.get("risks", [])
+
+            if not isinstance(raw_risks, list):
                 logger.warning(
-                    f"解析风险项失败: {e}, "
-                    f"文件={file_change.filename}, "
-                    f"原始数据: {str(item)[:200]}"
+                    f"{file_change.filename} 块 [{idx + 1}]: 风险识别返回格式异常, 已忽略"
                 )
+                continue
 
-        return risks
+            for item in raw_risks:
+                try:
+                    risk = RiskItem(
+                        severity=item.get("severity", "P3"),
+                        category=item.get("category", ""),
+                        file=file_change.filename,
+                        line_range=item.get("line_range", ""),
+                        title=item.get("title", ""),
+                        description=item.get("description", ""),
+                        suggestion=item.get("suggestion", ""),
+                        code_snippet=item.get("code_snippet", ""),
+                        confidence=float(item.get("confidence", 0.5)),
+                    )
+                    all_risks.append(risk)
+                except Exception as e:
+                    logger.warning(
+                        f"解析风险项失败: {e}, "
+                        f"文件={file_change.filename}, "
+                        f"块 [{idx + 1}], "
+                        f"原始数据: {str(item)[:200]}"
+                    )
+
+        if is_chunked and all_risks:
+            logger.info(
+                f"{file_change.filename}: 分块分析完成, "
+                f"{len(file_contexts)} 块共发现 {len(all_risks)} 个风险"
+            )
+
+        return all_risks
 
     # ──────────────────────────────────────────────
     # Stage 1: 变更总结
@@ -762,6 +791,28 @@ class LLMService:
     # ──────────────────────────────────────────────
     # 结果过滤与后处理
     # ──────────────────────────────────────────────
+
+    def _should_include_risk(
+        self, risk: RiskItem, mode: AnalysisMode
+    ) -> bool:
+        """
+        判断单个风险是否应在当前模式下展示
+
+        与 _filter_by_mode 保持一致的过滤规则,
+        用于在流式分析中即时判断, 避免 yield 不该展示的风险。
+
+        Args:
+            risk: 待检查的风险项
+            mode: 分析模式
+
+        Returns:
+            True = 应该展示, False = 应过滤
+        """
+        if mode == AnalysisMode.SIMPLE:
+            return risk.severity == "P0"
+        if mode in (AnalysisMode.NORMAL, AnalysisMode.LARGE):
+            return risk.severity in ("P0", "P1") and risk.confidence >= 0.65
+        return True
 
     def _filter_by_mode(
         self, risks: list[RiskItem], mode: AnalysisMode
