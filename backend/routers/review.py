@@ -112,8 +112,12 @@ async def review_pr(
         context = context_builder.build_context(pr_data)
 
     # ── Step 3: LLM 分析 ──
+    # Day 2 升级: 非 trivial 模式使用逐文件深度分析
     try:
-        analysis = llm.analyze(pr_data, context, mode)
+        if mode.value == "trivial":
+            analysis = llm.analyze(pr_data, context, mode)
+        else:
+            analysis = llm.analyze_per_file(pr_data, context, mode, context_builder)
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=f"LLM 分析失败: {e}")
 
