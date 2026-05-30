@@ -121,3 +121,15 @@ class PRReviewResponse(BaseModel):
     pr_metadata: PRMetadata = Field(default_factory=PRMetadata, description="PR 元信息")
     analysis: Optional[AnalysisResult] = Field(default=None, description="分析结果")
     error: Optional[str] = Field(default=None, description="错误信息")
+    from_cache: bool = Field(default=False, description="是否来自本地缓存 (未重新调用 LLM)")
+    cached_at: Optional[str] = Field(default=None, description="缓存保存时间 (ISO 8601)")
+
+
+class CacheCheckResponse(BaseModel):
+    """缓存检查响应 (用于前端预检是否有缓存)"""
+    cached: bool = Field(..., description="是否有已缓存的 Review 结果")
+    from_cache: bool = Field(default=False, description="本次响应是否来自缓存")
+    cached_at: Optional[str] = Field(default=None, description="缓存保存时间")
+    review_id: Optional[str] = Field(default=None, description="本次 Review 的唯一标识")
+    pr_metadata: Optional[dict] = Field(default=None, description="PR 元信息 (dict)")
+    analysis: Optional[dict] = Field(default=None, description="分析结果 (dict)")
