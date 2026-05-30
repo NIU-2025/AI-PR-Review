@@ -383,6 +383,137 @@ class LLMService:
         )
 
     # ──────────────────────────────────────────────
+    # Day 2 新增: 流式逐文件分析 (SSE Generator)
+    # ──────────────────────────────────────────────
+
+    def analyze_per_file_stream(
+        self,
+        pr_data: PRData,
+        overall_context: str,
+        mode: AnalysisMode,
+        context_builder: ContextBuilder,
+    ):
+        """
+        逐文件深度分析的流式版本 — Python Generator
+
+        与 analyze_per_file() 逻辑相同, 但通过 yield 逐事件推送结果,
+        供 SSE (Server-Sent Events) 端点消费, 实现前端渐进渲染。
+
+        每个 yield 项是一个 dict: {"event": "事件类型", "data": 数据}
+
+        事件类型:
+        - progress: 进度提示文字 (str)
+        - summary:  变更总结结果 (dict, ChangeSummary.model_dump())
+        - risk:     单个风险项 (dict, RiskItem.model_dump())
+        - done:     分析完成, 含元信息
+
+        Args:
+            pr_data: PR 完整数据
+            overall_context: 整体上下文 (用于变更总结)
+            mode: 分析模式
+            context_builder: 上下文构建器
+        """
+        start_time = time.time()
+        self._total_tokens_used = 0
+
+        # ── Stage 1: 变更总结 ──
+        logger.info(f"[Stream] Stage 1 开始变更总结")
+        yield {"event": "progress", "data": "正在分析 PR 变更总结..."}
+        summary = self._run_summary_stage(overall_context, mode)
+        yield {"event": "summary", "data": summary.model_dump()}
+        logger.info(f"[Stream] Stage 1 完成, 风险等级={summary.risk_level}")
+
+        # ── Stage 2: 逐文件风险识别 ──
+        all_risks: list[RiskItem] = []
+        if mode != AnalysisMode.TRIVIAL:
+            logger.info(f"[Stream] Stage 2 开始逐文件风险识别")
+
+            cross_hints = context_builder.extract_cross_file_dependencies(pr_data.files)
+            sorted_files = context_builder.sort_files_by_importance(pr_data.files)
+            files_to_analyze = [
+                f for f in sorted_files
+                if not context_builder.should_skip_file(f)
+            ]
+
+            # ── 模式限额 ──
+            if mode == AnalysisMode.LARGE:
+                files_to_analyze = files_to_analyze[:30]
+            elif mode == AnalysisMode.SIMPLE:
+                files_to_analyze = files_to_analyze[:5]
+
+            file_count = len(files_to_analyze)
+
+            yield {
+                "event": "progress",
+                "data": (
+                    f"待分析 {file_count} 个文件 "
+                    f"(跳过 {len(pr_data.files) - file_count} 个)"
+                ),
+            }
+
+            # ── 逐文件分析, 每个文件分析完立即 yield 风险 ──
+            for idx, file_change in enumerate(files_to_analyze):
+                yield {
+                    "event": "progress",
+                    "data": f"正在分析 ({idx + 1}/{file_count}): {file_change.filename}",
+                }
+
+                logger.info(
+                    f"[Stream] 分析文件 [{idx + 1}/{file_count}]: "
+                    f"{file_change.filename}"
+                )
+
+                file_context = context_builder.build_file_context(
+                    file_change, pr_data, cross_hints
+                )
+
+                try:
+                    file_risks = self._analyze_single_file(file_change, file_context)
+                    for risk in file_risks:
+                        # 单个风险立即推送, 前端可以逐个展示
+                        yield {"event": "risk", "data": risk.model_dump()}
+                    all_risks.extend(file_risks)
+                    if file_risks:
+                        logger.info(
+                            f"  {file_change.filename}: +{len(file_risks)} 个风险"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"文件 {file_change.filename} 分析失败, 跳过: {e}"
+                    )
+
+            # ── 最终过滤 ──
+            all_risks = self._filter_by_mode(all_risks, mode)
+            all_risks = self._deduplicate_risks(all_risks)
+            all_risks = all_risks[:10]
+
+        elapsed_ms = int((time.time() - start_time) * 1000)
+
+        yield {
+            "event": "progress",
+            "data": "分析完成!",
+        }
+
+        # ── done 事件携带元信息 ──
+        yield {
+            "event": "done",
+            "data": {
+                "model": self.model,
+                "tokens": self._total_tokens_used,
+                "duration_ms": elapsed_ms,
+                "risk_count": len(all_risks),
+                "risk_level": summary.risk_level,
+            },
+        }
+
+        logger.info(
+            f"[Stream] 流式分析完成: "
+            f"耗时={elapsed_ms}ms, "
+            f"tokens={self._total_tokens_used}, "
+            f"风险数={len(all_risks)}"
+        )
+
+    # ──────────────────────────────────────────────
     # Day 2 新增: 逐文件风险识别实现
     # ──────────────────────────────────────────────
 
