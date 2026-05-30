@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI PR Review</title>
     <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
 </head>
 <body>
     <div class="app">
@@ -14,7 +15,7 @@
                 <span class="logo-icon">🔍</span>
                 AI PR Review
             </h1>
-            <span class="badge">Day 1 MVP</span>
+            <span class="badge">Day 2</span>
         </header>
 
         <!-- 输入区域 -->
@@ -81,7 +82,19 @@
 
             <!-- 风险详情 -->
             <div class="card risks-card">
-                <h2 class="card-title">🔴 风险详情</h2>
+                <div class="card-title-row">
+                    <h2 class="card-title">🔴 风险详情</h2>
+                    <span id="riskCountBadge" class="risk-count-badge" style="display:none;"></span>
+                </div>
+                <!-- 分类筛选栏 -->
+                <div id="riskFilterBar" class="risk-filter-bar" style="display:none;">
+                    <button class="filter-tag active" data-filter="all">全部</button>
+                    <button class="filter-tag cat-安全" data-filter="安全">🔒 安全</button>
+                    <button class="filter-tag cat-性能" data-filter="性能">⚡ 性能</button>
+                    <button class="filter-tag cat-逻辑" data-filter="逻辑">🧠 逻辑</button>
+                    <button class="filter-tag cat-稳定性" data-filter="稳定性">🛡 稳定性</button>
+                    <button class="filter-tag cat-规范" data-filter="规范">📏 规范</button>
+                </div>
                 <div id="risksContent"></div>
             </div>
 
@@ -98,6 +111,7 @@
         </footer>
     </div>
 
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <script src="/static/app.js"></script>
 </body>
 </html>
