@@ -277,8 +277,8 @@ class ContextBuilder:
         if not patch:
             return f"{header}\n(无 diff 内容, 可能是二进制文件)"
 
-        # 简单截断: 单个文件 patch 不超过 ~8000 字符
-        max_patch_chars = 8000
+        # 简单截断: 单个文件 patch 不超过 ~24000 字符
+        max_patch_chars = 24000
         if len(patch) > max_patch_chars:
             patch = patch[:max_patch_chars]
             patch += "\n...(文件 diff 过长, 已截断)"
@@ -432,7 +432,7 @@ class ContextBuilder:
         # ── 代码 diff ──
         patch = file_change.patch
         # 单文件上下文 token 预算: ~8K chars
-        max_patch_chars = 8000
+        max_patch_chars = 24000
         if len(patch) > max_patch_chars:
             patch = patch[:max_patch_chars]
             patch += "\n...(文件过大, diff 已截断)"

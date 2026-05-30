@@ -34,7 +34,7 @@ class LLMConfig:
     api_key: str = ""
     api_base_url: str = "https://api.deepseek.com"
     model_name: str = "deepseek-v4-flash"
-    max_tokens: int = 4096
+    max_tokens: int = 8192
     temperature: float = 0.1
     request_timeout: int = 120
 
@@ -42,9 +42,9 @@ class LLMConfig:
 @dataclass
 class ContextConfig:
     """上下文构建相关配置"""
-    max_context_tokens: int = 16000
-    context_lines_around_hunk: int = 15
-    max_files_for_full_analysis: int = 30
+    max_context_tokens: int = 64000
+    context_lines_around_hunk: int = 25
+    max_files_for_full_analysis: int = 50
     min_files_for_trivial_mode: int = 1
     max_lines_for_trivial_mode: int = 10
     max_lines_for_simple_mode: int = 50
