@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI PR Review</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app">
+        <!-- 顶部导航 -->
+        <header class="header">
+            <h1 class="logo">
+                <span class="logo-icon">🔍</span>
+                AI PR Review
+            </h1>
+            <span class="badge">Day 1 MVP</span>
+        </header>
+
+        <!-- 输入区域 -->
+        <section class="input-section">
+            <div class="input-card">
+                <label class="input-label" for="prUrl">
+                    输入 GitHub Pull Request URL
+                </label>
+                <div class="input-row">
+                    <input
+                        type="text"
+                        id="prUrl"
+                        class="url-input"
+                        placeholder="https://github.com/owner/repo/pull/123"
+                        autofocus
+                    />
+                    <button id="analyzeBtn" class="btn btn-primary">
+                        <span class="btn-text">开始 Review</span>
+                        <span class="btn-loading" style="display:none;">
+                            <span class="spinner"></span>
+                            分析中...
+                        </span>
+                    </button>
+                </div>
+                <p class="input-hint">
+                    支持任何公开的 GitHub PR。示例: https://github.com/facebook/react/pull/30000
+                </p>
+            </div>
+        </section>
+
+        <!-- 状态提示 -->
+        <section id="statusSection" class="status-section" style="display:none;">
+            <div id="statusContent" class="status-card"></div>
+        </section>
+
+        <!-- 结果区域 -->
+        <section id="resultSection" class="result-section" style="display:none;">
+
+            <!-- 变更总结 -->
+            <div class="card summary-card">
+                <h2 class="card-title">📋 变更总结</h2>
+                <div id="summaryContent"></div>
+            </div>
+
+            <!-- 整体风险评级 -->
+            <div class="card risk-level-card">
+                <h2 class="card-title">⚠️ 整体风险评估</h2>
+                <div id="riskLevelContent"></div>
+            </div>
+
+            <!-- 风险详情 -->
+            <div class="card risks-card">
+                <h2 class="card-title">🔴 风险详情</h2>
+                <div id="risksContent"></div>
+            </div>
+
+            <!-- 元信息 -->
+            <div class="card meta-card">
+                <h2 class="card-title">📊 分析信息</h2>
+                <div id="metaContent"></div>
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>AI PR Review · 基于大语言模型的代码评审助手 · v0.1.0</p>
+        </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
