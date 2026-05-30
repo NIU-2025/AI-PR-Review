@@ -1,6 +1,8 @@
 /**
  * AI PR Review - 前端交互逻辑
  *
+ * v2.1 — Day 3: 缓存预检 + 本地文件加载 (check-cache)
+ *
  * 核心功能:
  * - 提交 PR URL 到后端 /api/review/stream (SSE 流式分析)
  * - 渐进渲染: 先出总结 → 逐个出风险 → 最后出元信息
@@ -54,6 +56,9 @@ prUrlInput.addEventListener('keydown', (e) => {
 async function handleAnalyze() {
     const prUrl = prUrlInput.value.trim();
 
+    // ── v2.1 版本标记: 浏览器控制台出现此行说明加载了最新 JS ──
+    console.log('[app.js v2.1] 缓存预检版本已加载');
+
     // ── 防抖: 分析进行中不允许重复提交 ──
     if (isAnalyzing) {
         console.log('分析正在进行中, 忽略重复提交');
@@ -80,25 +85,54 @@ async function handleAnalyze() {
     riskIndex = 0;
     currentFilter = 'all';
 
-    // 重置筛选栏
     resetFilterBar();
 
-    // 清空结果区域
     document.getElementById('summaryContent').innerHTML = '';
     document.getElementById('riskLevelContent').innerHTML = '';
     document.getElementById('risksContent').innerHTML = '';
     document.getElementById('metaContent').innerHTML = '';
 
-    // 显示结果卡片（内容为空, 等待流式填充）
     resultSection.style.display = '';
 
-    // ── 创建 AbortController (支持取消) ──
     if (currentAbortController) {
         currentAbortController.abort();
     }
     currentAbortController = new AbortController();
 
     try {
+        // ── Day 3: 缓存预检 ──
+        console.log('[缓存预检] 正在检查...');
+        const cacheResponse = await fetch(`${API_BASE}/api/review/check-cache`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pr_url: prUrl }),
+            signal: currentAbortController.signal,
+        });
+
+        if (!cacheResponse.ok) {
+            const errData = await cacheResponse.json().catch(() => ({}));
+            console.error('[缓存预检] HTTP 错误:', cacheResponse.status, errData);
+            throw new Error(errData.detail || `缓存检查失败 (${cacheResponse.status})`);
+        }
+
+        const cacheData = await cacheResponse.json();
+        console.log('[缓存预检] 响应:', {
+            cached: cacheData.cached,
+            hasAnalysis: !!cacheData.analysis,
+            cachedAt: cacheData.cached_at,
+            reviewId: cacheData.review_id,
+        });
+
+        if (cacheData.cached && cacheData.analysis) {
+            console.log('[缓存命中] ✅ 直接渲染本地结果, 跳过 LLM');
+            renderCachedResult(cacheData);
+            setLoading(false);
+            isAnalyzing = false;
+            return;
+        }
+
+        console.log('[缓存未命中] ❌ 开始 LLM 流式分析');
+
         const response = await fetch(`${API_BASE}/api/review/stream`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -111,7 +145,6 @@ async function handleAnalyze() {
             throw new Error(errorData.detail || `服务器错误 (${response.status})`);
         }
 
-        // ── 读取 SSE 流 ──
         await parseSSEStream(response);
 
     } catch (error) {
@@ -568,6 +601,57 @@ function toggleRisk(index) {
     if (item) {
         item.classList.toggle('expanded');
     }
+}
+
+// ──────────────────────────────────────────────
+// Day 3: 缓存结果直接渲染
+// ──────────────────────────────────────────────
+
+function renderCachedResult(cacheData) {
+    resultSection.style.display = '';
+
+    const meta = cacheData.pr_metadata || {};
+    renderMeta(meta, null);
+
+    const cachedAt = cacheData.cached_at || '';
+    const cachedTime = cachedAt ? new Date(cachedAt).toLocaleString('zh-CN') : '';
+    const metaContainer = document.getElementById('metaContent');
+    if (metaContainer && cachedTime) {
+        metaContainer.insertAdjacentHTML('afterbegin', `
+            <div class="cache-badge">
+                ⚡ 来自缓存 · ${cachedTime}
+            </div>
+        `);
+    }
+
+    const analysis = cacheData.analysis || {};
+
+    const summary = analysis.summary || {};
+    renderSummary(summary);
+
+    renderRiskLevel(summary.risk_level || 'unknown');
+
+    const risks = analysis.risks || [];
+    riskItems = risks;
+    riskIndex = risks.length;
+
+    if (risks.length > 0) {
+        risks.forEach((risk, idx) => {
+            appendRiskItem(risk, idx);
+        });
+        showFilterBar();
+        updateRiskCountBadge(risks.length);
+    } else {
+        document.getElementById('risksContent').innerHTML =
+            '<div class="no-risks"><span class="no-risks-icon">✅</span><strong>未发现需要关注的风险代码</strong>本次变更的代码质量良好</div>';
+    }
+
+    renderMeta(null, {
+        model: analysis.llm_model || cacheData.llm_model || 'N/A',
+        tokens: analysis.token_used || cacheData.tokens_used || 0,
+        duration_ms: analysis.analysis_duration_ms || cacheData.duration_ms || 0,
+        risk_count: risks.length,
+    });
 }
 
 function escapeHtml(str) {
