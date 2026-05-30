@@ -54,11 +54,19 @@ class ContextConfig:
 
 
 @dataclass
+class StorageConfig:
+    """结果持久化相关配置"""
+    results_dir: str = "results"
+    auto_save_enabled: bool = True
+
+
+@dataclass
 class AppConfig:
     """应用全局配置"""
     github: GitHubConfig = field(default_factory=GitHubConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
+    storage: StorageConfig = field(default_factory=StorageConfig)
     cors_origins: list = field(default_factory=lambda: ["*"])
     host: str = "0.0.0.0"
     port: int = 8000
