@@ -181,6 +181,8 @@ class LLMService:
         self.config = config
         self.model = config.model_name
 
+        self._total_tokens_used = 0
+
         self._client = OpenAI(
             api_key=config.api_key,
             base_url=config.api_base_url,
@@ -209,7 +211,7 @@ class LLMService:
             AnalysisResult: 分析结果
         """
         start_time = time.time()
-        total_tokens = 0
+        self._total_tokens_used = 0
 
         # ── Stage 1: 变更总结 (所有模式都执行) ──
         logger.info(f"[Stage 1] 开始变更总结 (模式={mode.value})")
@@ -229,7 +231,7 @@ class LLMService:
             summary=summary,
             risks=risks,
             llm_model=self.model,
-            token_used=total_tokens,
+            token_used=self._total_tokens_used,
             analysis_duration_ms=elapsed_ms,
         )
 
@@ -263,7 +265,7 @@ class LLMService:
             AnalysisResult: 包含总结和逐文件风险的分析结果
         """
         start_time = time.time()
-        total_tokens = 0
+        self._total_tokens_used = 0
 
         # ── Stage 1: 变更总结 (同上) ──
         logger.info(f"[Stage 1] 开始变更总结 (模式={mode.value})")
@@ -289,7 +291,7 @@ class LLMService:
             summary=summary,
             risks=all_risks,
             llm_model=self.model,
-            token_used=total_tokens,
+            token_used=self._total_tokens_used,
             analysis_duration_ms=elapsed_ms,
         )
 
@@ -628,6 +630,7 @@ class LLMService:
 
             usage = response.usage
             if usage:
+                self._total_tokens_used += usage.total_tokens
                 logger.info(
                     f"LLM 调用完成: "
                     f"prompt_tokens={usage.prompt_tokens}, "
