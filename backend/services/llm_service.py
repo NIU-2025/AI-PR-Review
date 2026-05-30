@@ -12,6 +12,7 @@ LLM 分析服务模块
 支持的模型: 任何兼容 OpenAI API 的模型 (GPT-4o, DeepSeek-V3, Claude 等)
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -23,6 +24,7 @@ from config import LLMConfig
 from models.schemas import (
     AnalysisResult,
     ChangeSummary,
+    FileChange,
     PRData,
     RiskItem,
 )
@@ -116,6 +118,54 @@ SYSTEM_PROMPT_TRIVIAL = """你是一位资深代码评审专家。
 仅输出 JSON, 不要包含其他文字。"""
 
 
+# === Stage 2 (逐文件模式): 单文件风险分析 ===
+
+SYSTEM_PROMPT_PER_FILE_RISK = """你是一位资深代码安全与质量审计专家。
+你的任务是审查**单个文件**的代码变更, 识别潜在的风险和问题。
+
+## 重要: 你只分析下面提供的一个文件, 不要分析其他文件!
+
+## 风险等级定义
+- P0 (关键): 确定有问题的代码, 可能导致安全漏洞、数据丢失、服务崩溃
+- P1 (高): 很可能有问题, 如逻辑矛盾、明显性能问题、空指针/未定义行为
+- P2 (中): 可能有隐患, 如不符合最佳实践、边界条件未处理、资源泄露风险
+- P3 (低): 建议改进, 如命名不规范、注释缺失、代码风格
+
+## 自我反驳机制 (重要!)
+对每一个你标记的风险, 你必须先在内心完成自我反驳:
+"这段代码在什么情况下实际上是安全的? 文件中是否有其他地方做了一样的模式?"
+只有当反驳不成立时, 才将该风险输出。
+
+## 白名单 (以下模式不应报告为风险)
+- 非空检查的惯用写法 (如 if (x == null) return; 或 if not x: return)
+- 日志级别/内容的调整 (除非导致敏感信息泄露)
+- 注释增删、格式化调整、import 排序
+- 测试文件中的 "硬编码" 测试数据
+- 已经存在于旧代码中的模式 (仅标记新增代码中的问题)
+- 变量重命名、函数重命名 (除非破坏了语义)
+- 配置文件中新增的普通配置项
+
+## 输出要求
+请以 JSON 格式输出该文件的风险列表, 每个风险包含:
+{
+  "risks": [
+    {
+      "severity": "P0|P1|P2|P3",
+      "file": "文件路径",
+      "line_range": "涉及行范围, 如 L42-L58",
+      "title": "风险标题 (简洁, ≤15字)",
+      "description": "风险详细描述, 说明为什么这是问题",
+      "suggestion": "具体的改进建议或修改方案",
+      "code_snippet": "相关代码片段",
+      "confidence": 0.85  // 置信度 0-1, 低于 0.6 的风险不要输出
+    }
+  ]
+}
+
+如果该文件的变更中没有发现任何风险, 请输出 {"risks": []}。
+仅输出 JSON, 不要包含其他文字。"""
+
+
 # ──────────────────────────────────────────────
 # LLM 服务类
 # ──────────────────────────────────────────────
@@ -182,6 +232,217 @@ class LLMService:
             token_used=total_tokens,
             analysis_duration_ms=elapsed_ms,
         )
+
+    # ──────────────────────────────────────────────
+    # Day 2 新增: 逐文件分析入口
+    # ──────────────────────────────────────────────
+
+    def analyze_per_file(
+        self,
+        pr_data: PRData,
+        overall_context: str,
+        mode: AnalysisMode,
+        context_builder: ContextBuilder,
+    ) -> AnalysisResult:
+        """
+        逐文件深度分析入口
+
+        流程:
+        1. 先用整体上下文跑 Stage 1 变更总结
+        2. 用 context_builder 进行文件排序、跳过、上下文构建
+        3. 逐文件调用 LLM 进行风险识别 (顺序执行, 控制 API 压力)
+        4. 汇总所有文件的风险 + 整体总结
+
+        Args:
+            pr_data: PR 完整数据
+            overall_context: 整体上下文 (用于变更总结)
+            mode: 分析模式
+            context_builder: 上下文构建器 (用于文件级上下文)
+
+        Returns:
+            AnalysisResult: 包含总结和逐文件风险的分析结果
+        """
+        start_time = time.time()
+        total_tokens = 0
+
+        # ── Stage 1: 变更总结 (同上) ──
+        logger.info(f"[Stage 1] 开始变更总结 (模式={mode.value})")
+        summary = self._run_summary_stage(overall_context, mode)
+        logger.info(f"[Stage 1] 变更总结完成, 风险等级={summary.risk_level}")
+
+        # ── Stage 2: 逐文件风险识别 ──
+        all_risks: list[RiskItem] = []
+        if mode != AnalysisMode.TRIVIAL:
+            logger.info(f"[Stage 2] 开始逐文件风险识别 (模式={mode.value})")
+            all_risks = self._run_per_file_risk_stage(
+                pr_data, mode, context_builder
+            )
+            logger.info(
+                f"[Stage 2] 逐文件风险识别完成, "
+                f"共分析 {len([f for f in pr_data.files if not context_builder.should_skip_file(f)])} 个文件, "
+                f"发现 {len(all_risks)} 个风险"
+            )
+
+        elapsed_ms = int((time.time() - start_time) * 1000)
+
+        return AnalysisResult(
+            summary=summary,
+            risks=all_risks,
+            llm_model=self.model,
+            token_used=total_tokens,
+            analysis_duration_ms=elapsed_ms,
+        )
+
+    # ──────────────────────────────────────────────
+    # Day 2 新增: 逐文件风险识别实现
+    # ──────────────────────────────────────────────
+
+    def _run_per_file_risk_stage(
+        self,
+        pr_data: PRData,
+        mode: AnalysisMode,
+        context_builder: ContextBuilder,
+    ) -> list[RiskItem]:
+        """
+        逐文件执行风险识别
+
+        步骤:
+        1. 提取跨文件依赖提示
+        2. 按重要性排序文件
+        3. 跳过无分析价值的文件
+        4. 根据模式限制分析文件数量
+        5. 为每个文件构建独立上下文 → 调用 LLM → 收集风险
+        6. 汇总、过滤、去重
+
+        Args:
+            pr_data: PR 数据
+            mode: 分析模式
+            context_builder: 上下文构建器
+
+        Returns:
+            聚合后的风险列表
+        """
+        # ── Step 1: 提取跨文件依赖提示 ──
+        cross_hints = context_builder.extract_cross_file_dependencies(pr_data.files)
+
+        # ── Step 2: 按重要性排序 ──
+        sorted_files = context_builder.sort_files_by_importance(pr_data.files)
+
+        # ── Step 3: 过滤掉无需分析的文件 ──
+        files_to_analyze = [
+            f for f in sorted_files
+            if not context_builder.should_skip_file(f)
+        ]
+        logger.info(
+            f"待分析文件: {len(files_to_analyze)}/{len(pr_data.files)} "
+            f"(跳过 {len(pr_data.files) - len(files_to_analyze)} 个)"
+        )
+
+        # ── Step 4: 根据模式限制分析文件数 ──
+        # large 模式只分析前 30 个重要文件, 防止耗时爆炸
+        if mode == AnalysisMode.LARGE:
+            files_to_analyze = files_to_analyze[:30]
+        # simple 模式只分析前 5 个
+        elif mode == AnalysisMode.SIMPLE:
+            files_to_analyze = files_to_analyze[:5]
+
+        # ── Step 5: 逐文件分析 ──
+        all_risks: list[RiskItem] = []
+        analyzed_count = 0
+        file_count = len(files_to_analyze)
+
+        for idx, file_change in enumerate(files_to_analyze):
+            logger.info(
+                f"分析文件 [{idx + 1}/{file_count}]: {file_change.filename}"
+            )
+
+            # 构建文件级上下文
+            file_context = context_builder.build_file_context(
+                file_change, pr_data, cross_hints
+            )
+
+            # 调用 LLM 分析
+            try:
+                file_risks = self._analyze_single_file(file_change, file_context)
+                all_risks.extend(file_risks)
+                analyzed_count += 1
+                if file_risks:
+                    logger.info(
+                        f"  {file_change.filename}: 发现 {len(file_risks)} 个风险"
+                    )
+            except Exception as e:
+                # 单个文件分析失败不应阻断整体流程
+                logger.warning(
+                    f"文件 {file_change.filename} 分析失败, 跳过: {e}"
+                )
+                continue
+
+        logger.info(
+            f"逐文件分析完成: {analyzed_count}/{file_count} 个文件分析成功, "
+            f"累计风险 {len(all_risks)} 个"
+        )
+
+        # ── Step 6: 汇总、过滤、去重 ──
+        all_risks = self._filter_by_mode(all_risks, mode)
+        all_risks = self._deduplicate_risks(all_risks)
+        all_risks = all_risks[:10]  # 总量上限
+
+        return all_risks
+
+    def _analyze_single_file(
+        self, file_change: FileChange, file_context: str
+    ) -> list[RiskItem]:
+        """
+        分析单个文件的变更风险
+
+        调用 LLM 对单个文件的上下文进行分析, 并解析返回的风险列表。
+        此方法被 _run_per_file_risk_stage 循环调用。
+
+        Args:
+            file_change: 文件变更信息
+            file_context: 该文件的独立分析上下文
+
+        Returns:
+            该文件的风险项列表
+        """
+        user_prompt = (
+            f"请审查以下文件中新增/修改的代码是否存在风险:\n\n"
+            f"{file_context}"
+        )
+
+        raw_output = self._call_llm(SYSTEM_PROMPT_PER_FILE_RISK, user_prompt)
+        parsed = self._safe_json_parse(raw_output)
+        raw_risks = parsed.get("risks", [])
+
+        if not isinstance(raw_risks, list):
+            logger.warning(
+                f"{file_change.filename}: 风险识别返回格式异常, 已忽略"
+            )
+            return []
+
+        risks = []
+        for item in raw_risks:
+            try:
+                risk = RiskItem(
+                    severity=item.get("severity", "P3"),
+                    # 强制使用当前文件的路径, 避免 LLM 返回错误的文件路径
+                    file=file_change.filename,
+                    line_range=item.get("line_range", ""),
+                    title=item.get("title", ""),
+                    description=item.get("description", ""),
+                    suggestion=item.get("suggestion", ""),
+                    code_snippet=item.get("code_snippet", ""),
+                    confidence=float(item.get("confidence", 0.5)),
+                )
+                risks.append(risk)
+            except Exception as e:
+                logger.warning(
+                    f"解析风险项失败: {e}, "
+                    f"文件={file_change.filename}, "
+                    f"原始数据: {str(item)[:200]}"
+                )
+
+        return risks
 
     # ──────────────────────────────────────────────
     # Stage 1: 变更总结
