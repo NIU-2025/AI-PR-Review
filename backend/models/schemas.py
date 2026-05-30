@@ -72,17 +72,21 @@ class RiskItem(BaseModel):
         ...,
         description="风险等级: P0(关键)/P1(高)/P2(中)/P3(低)"
     )
+    category: str = Field(
+        default="",
+        description="风险分类标签: 安全/性能/逻辑/稳定性/规范"
+    )
     file: str = Field(..., description="所在文件路径")
     line_range: str = Field(default="", description="涉及行范围, 如 'L42-L58'")
     title: str = Field(..., description="风险标题摘要")
-    description: str = Field(..., description="风险详细描述")
-    suggestion: str = Field(default="", description="改进建议")
+    description: str = Field(..., description="风险详细描述, 说明为什么这是问题")
+    suggestion: str = Field(default="", description="具体改进建议, 含可应用的代码示例")
     code_snippet: str = Field(default="", description="相关代码片段")
     confidence: float = Field(
         default=0.0,
         ge=0.0,
         le=1.0,
-        description="置信度 (0-1), 低于0.6的风险可能不展示"
+        description="置信度 (0-1), 低于0.65的风险不展示给用户"
     )
 
 
