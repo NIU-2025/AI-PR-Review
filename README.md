@@ -98,20 +98,20 @@
 
 | 模型 | 上下文窗口 | 代码理解 | 中文能力 | 单价 (输入/输出) | 可用性 |
 |---|---|---|---|---|---|
-| **DeepSeek-V4** (`deepseek-chat`) | 128K | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ¥1/¥2 (百万token) | 国内直连 |
+| **DeepSeek-V4** (`deepseek-v4-flash`) | 128K | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ¥1/¥2 (百万token) | 国内直连 |
 | **GPT-4o** (`gpt-4o`) | 128K | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | $5/$15 | 需代理 |
 | **GPT-4o-mini** | 128K | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | $0.15/$0.6 | 需代理 |
 | **Claude 3.5 Sonnet** | 200K | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | $3/$15 | 需代理 |
 | **通义千问 Qwen-Max** | 32K | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ¥2.4/¥9.6 | 国内直连 |
 | **智谱 GLM-4-Plus** | 128K | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ¥5/¥5 | 国内直连 |
 
-### 选型决策：为什么选择 DeepSeek-V3 作为主模型
+### 选型决策：为什么选择 DeepSeek-V4 作为主模型
 
-**1. 代码理解能力**：DeepSeek-V3 在 HumanEval、MBPP 等代码基准测试中表现优异，尤其擅长识别代码中的安全漏洞和逻辑错误——这正是代码评审的核心需求。
+**1. 代码理解能力**：DeepSeek-V4 在 HumanEval、MBPP 等代码基准测试中表现优异，尤其擅长识别代码中的安全漏洞和逻辑错误——这正是代码评审的核心需求。
 
 **2. 128K 上下文窗口**：中等规模的 PR 通常包含 20-50 个文件、数百行变更。128K 上下文意味着可以将完整 diff + PR 描述 + 分析指令一次性注入，无需粗暴截断。对比通义千问 Qwen-Max 的 32K 窗口，在处理大型 PR 时有明显优势。
 
-**3. 中文 Prompt 理解 + 英文代码分析**：本项目面向中文开发者，Prompt 使用中文编写以提升指令遵循度，而分析对象是英文代码。DeepSeek-V3 在双语混合场景下表现稳定，不会因语言切换导致分析质量下降。
+**3. 中文 Prompt 理解 + 英文代码分析**：本项目面向中文开发者，Prompt 使用中文编写以提升指令遵循度，而分析对象是英文代码。DeepSeek-V4 在双语混合场景下表现稳定，不会因语言切换导致分析质量下降。
 
 **4. 成本极低**：百万 token 输入仅 ¥1。以一次典型 PR 分析消耗 15K-30K token 计算，单次分析成本约 ¥0.02-0.05。
 
@@ -131,7 +131,7 @@ LLM_API_BASE=https://your-proxy.com/v1
 LLM_MODEL=claude-3-5-sonnet-20241022
 ```
 
-推荐策略：**日常使用 DeepSeek-V3**，对安全敏感的 PR（如涉及认证/支付/数据持久化）可临时切换至 GPT-4o 或 Claude 3.5 Sonnet 进行双重确认。
+推荐策略：**日常使用 DeepSeek-V4**，对安全敏感的 PR（如涉及认证/支付/数据持久化）可临时切换至 GPT-4o 或 Claude 3.5 Sonnet 进行双重确认。
 
 ---
 
@@ -361,7 +361,7 @@ cp .env.example .env
 ```ini
 LLM_API_KEY=your-api-key
 LLM_API_BASE=https://api.deepseek.com/v1   # 或其他兼容 OpenAI 协议的服务
-LLM_MODEL=deepseek-chat                     # 推荐，性价比最高
+LLM_MODEL=deepseek-v4-flash                   # 推荐，性价比最高
 LLM_MAX_TOKENS=4096                         # 每次 LLM 调用的最大输出 token
 LLM_TEMPERATURE=0.1                         # 低温度以获得更确定性的分析结果
 GITHUB_TOKEN=                               # 可选，公开仓库不需要
@@ -445,7 +445,7 @@ curl -X POST http://localhost:8000/api/review/check-cache \
 例如：知识库中记录"所有 Controller 方法必须做权限校验"——当 PR 新增一个未做权限校验的接口时，系统能给出更精准的标记。
 
 **4. 多模型仲裁机制（Cross-Model Verification）**
-当前 Single LLM 模式存在单一模型的认知盲区。未来方案：同一段代码同时发送给 2-3 个不同厂商的模型（如 DeepSeek-V3 + GPT-4o + Claude 3.5 Sonnet），取"至少 2 个模型都认为有问题"的风险才输出——类似分布式系统的多数投票（Quorum）机制，进一步降低误报率。
+当前 Single LLM 模式存在单一模型的认知盲区。未来方案：同一段代码同时发送给 2-3 个不同厂商的模型（如 DeepSeek-V4 + GPT-4o + Claude 3.5 Sonnet），取"至少 2 个模型都认为有问题"的风险才输出——类似分布式系统的多数投票（Quorum）机制，进一步降低误报率。
 
 **5. 多语言 AST 深度分析**
 当前跨文件依赖分析基于文本模式匹配，准确度有限。引入 Tree-sitter 等通用 AST 解析器后，可以进行：
