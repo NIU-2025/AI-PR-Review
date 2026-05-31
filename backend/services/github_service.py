@@ -162,7 +162,6 @@ class GitHubService:
         etag = response.headers.get("ETag", "")
         if etag:
             self._pr_etag = etag
-            print(f"[github] 捕获 PR #{pr_number} 元数据 ETag: {etag[:50]}...", flush=True)
 
         return PRMetadata(
             title=data.get("title", ""),
@@ -334,13 +333,11 @@ class GitHubService:
 
             if response.status_code == 304:
                 logger.info(f"PR #{pr_number} 缓存验证通过: 304 Not Modified")
-                print(f"[github] PR #{pr_number} 缓存验证通过: 304 Not Modified", flush=True)
                 return True, ""
 
             if response.status_code == 200:
                 new_etag = response.headers.get("ETag", "")
                 logger.info(f"PR #{pr_number} 已更新, 新 ETag={new_etag}")
-                print(f"[github] PR #{pr_number} 已变更: HTTP 200, 新 ETag={new_etag[:50]}...", flush=True)
                 return False, new_etag
 
             if response.status_code == 404:
