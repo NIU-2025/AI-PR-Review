@@ -320,20 +320,37 @@ LLM 必须为每个风险输出一个 `confidence` 值（0-1）。系统丢弃�
 
 ## 快速开始
 
-### 1. 环境要求
+### 方式一：Docker 一键启动（推荐）
+
+```bash
+# 1. 配置环境变量
+cp .env.example .env
+# 编辑 .env，填入 LLM_API_KEY、 GITHUB_TOKEN 
+
+# 2. 启动
+docker compose -f docker/docker-compose.yml up -d
+
+# 3. 访问
+# 本地 Docker:     http://localhost:8000
+# GitHub Codespaces: 系统自动生成公网 URL（8000 端口）
+```
+
+### 方式二：Python 直接运行
+
+#### 1. 环境要求
 
 - Python 3.10+
 - Git
 - （可选）GitHub Personal Access Token，用于私有仓库或提高 API Rate Limit
 
-### 2. 安装依赖
+#### 2. 安装依赖
 
 ```bash
 cd AI-PR-Review
 pip install -r backend/requirements.txt
 ```
 
-### 3. 配置环境变量
+#### 3. 配置环境变量
 
 ```bash
 cp .env.example .env
@@ -350,7 +367,7 @@ LLM_TEMPERATURE=0.1                         # 低温度以获得更确定性的�
 GITHUB_TOKEN=                               # 可选，公开仓库不需要
 ```
 
-### 4. 启动服务
+#### 4. 启动服务
 
 ```bash
 cd backend
@@ -359,7 +376,7 @@ python main.py
 
 服务启动后，访问 `http://localhost:8000`，输入任意 GitHub PR URL 即可开始分析。
 
-### 5. Demo 验证
+### Demo 验证
 
 项目内置了含 6 类故意注入缺陷的测试文件 `tests/test_bugs.py`，可作为系统能力的自测验证基准：
 
@@ -413,15 +430,12 @@ curl -X POST http://localhost:8000/api/review/check-cache \
 **1. CI/CD 原生集成（GitHub Action / GitLab CI）**
 将分析能力封装为 GitHub Action，开发者提交 PR 时自动触发评审，结果以 Comment 形式回写到 PR 页面。开发者在 GitHub 界面内即可完成"提交 → 自动评审 → 查看风险 → 修复"的完整闭环，无需离开代码托管平台。
 
-**2. Docker 一键部署**
-提供 Dockerfile + docker-compose.yml，消除 Python 环境配置的门槛。评审专家或团队成员只需 `docker compose up` 即可启动完整服务。
-
-**3. 多平台扩展**
+**2. 多平台扩展**
 从 GitHub 扩展至 GitLab、Gitee、Bitbucket 等代码托管平台。核心分析逻辑不变，仅需增加对应平台的 API 适配层。GitHub/GitLab 的 PR/MR 概念高度一致，适配成本低。
 
 ### 中期（3-6 个月）：分析深度增强
 
-**4. RAG 知识库增强（项目上下文注入）**
+**3. RAG 知识库增强（项目上下文注入）**
 当前分析的上下文仅限于 PR 本身的 diff。引入项目级 RAG 知识库后，可注入以下额外信息：
 - 项目架构文档 → 判断变更是否符合架构规范
 - 团队编码规范 → 自动标记违反规范的代码
@@ -430,16 +444,16 @@ curl -X POST http://localhost:8000/api/review/check-cache \
 
 例如：知识库中记录"所有 Controller 方法必须做权限校验"——当 PR 新增一个未做权限校验的接口时，系统能给出更精准的标记。
 
-**5. 多模型仲裁机制（Cross-Model Verification）**
+**4. 多模型仲裁机制（Cross-Model Verification）**
 当前 Single LLM 模式存在单一模型的认知盲区。未来方案：同一段代码同时发送给 2-3 个不同厂商的模型（如 DeepSeek-V3 + GPT-4o + Claude 3.5 Sonnet），取"至少 2 个模型都认为有问题"的风险才输出——类似分布式系统的多数投票（Quorum）机制，进一步降低误报率。
 
-**6. 多语言 AST 深度分析**
+**5. 多语言 AST 深度分析**
 当前跨文件依赖分析基于文本模式匹配，准确度有限。引入 Tree-sitter 等通用 AST 解析器后，可以进行：
 - 精确的函数签名变更检测
 - 调用图构建（Call Graph）→ 真正的依赖影响分析
 - 数据流分析 → 发现潜在的未初始化变量、空指针路径
 
-**7. 团队自定义规则引擎**
+**6. 团队自定义规则引擎**
 允许团队定义自己的检测规则（如"所有数据库操作必须带超时"、"禁止在循环中使用 `+` 拼接字符串"），与通用分析结果合并输出。
 
 ### 长期（6-12 个月）：智能化与生态
@@ -459,7 +473,7 @@ curl -X POST http://localhost:8000/api/review/check-cache \
 **9. 代码修复自动生成 PR**
 从"发现问题"升级为"修复问题"：P0/P1 风险自动生成修复代码，以新 PR 形式提交给原仓库。开发者只需 Review + Merge 即可完成修复闭环。
 
-**10. IDE 插件生态**
+**9. IDE 插件生态**
 开发 VS Code / JetBrains 插件，将评审能力嵌入编码流程：写代码时实时提示潜在风险，提交前本地预评审，避免问题进入 PR 阶段。
 
 ---
