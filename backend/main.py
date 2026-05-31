@@ -78,6 +78,8 @@ async def startup_event():
     logger.info("AI PR Review 助手启动")
     logger.info(f"LLM Model: {config.llm.model_name}")
     logger.info(f"GitHub API: {config.github.api_base_url}")
+    if not config.llm.api_key:
+        logger.warning("⚠️ LLM_API_KEY 未配置！请在 .env 文件中填入您的 API Key，否则分析功能将不可用。")
     logger.info("=" * 50)
 
 
