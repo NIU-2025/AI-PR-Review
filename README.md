@@ -421,6 +421,10 @@ curl -X POST http://localhost:8000/api/review/check-cache \
 
 ---
 
+## 演示视频
+
+[观看 Demo 视频](https://www.bilibili.com/video/BV12vVU6SEFE/)
+
 ## 未来扩展方向
 
 > 本节说明系统在当前版本之外的设计演进路径，分为三个时间维度。
