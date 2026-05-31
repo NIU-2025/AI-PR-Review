@@ -56,7 +56,7 @@ class ContextConfig:
 @dataclass
 class StorageConfig:
     """结果持久化相关配置"""
-    results_dir: str = "results"
+    results_dir: str = "reviews"
     auto_save_enabled: bool = True
 
 
