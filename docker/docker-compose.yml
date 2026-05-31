@@ -1,0 +1,14 @@
+services:
+  ai-pr-review:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ai-pr-review
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    volumes:
+      - ../logger:/app/../logger
+      - ../reviews:/app/../reviews
+    restart: unless-stopped
