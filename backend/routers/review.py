@@ -94,10 +94,8 @@ async def check_cache(
 
     cached_meta = storage.find_cached(request.pr_url)
     logger.info(f"[check-cache] PR={request.pr_url}, cached_meta={'found' if cached_meta else 'NOT found'}")
-    print(f"[check-cache] PR={request.pr_url}, cached_meta={'found' if cached_meta else 'NOT found'}", flush=True)
     if cached_meta:
         logger.info(f"[check-cache] etag={cached_meta.get('etag', 'EMPTY')[:20]}..., review_id={cached_meta.get('review_id')}")
-        print(f"[check-cache] etag={cached_meta.get('etag', 'EMPTY')[:30]}..., review_id={cached_meta.get('review_id')}", flush=True)
 
     if cached_meta and cached_meta.get("etag"):
         try:
@@ -110,7 +108,6 @@ async def check_cache(
             cached_result = storage.load_result(cached_meta["review_id"])
             if cached_result:
                 logger.info(f"缓存命中: {request.pr_url} → {cached_meta['review_id']}")
-                print(f"[check-cache] ✅ 缓存命中! {request.pr_url} → {cached_meta['review_id']}", flush=True)
                 pr_meta = cached_result.get("pr_metadata", {})
                 analysis = cached_result.get("analysis", {})
                 return CacheCheckResponse(
@@ -123,7 +120,6 @@ async def check_cache(
                 )
 
     logger.info(f"[check-cache] 缓存未命中: has_meta={'yes' if cached_meta else 'no'}, has_etag={'yes' if (cached_meta and cached_meta.get('etag')) else 'no'}")
-    print(f"[check-cache] ❌ 缓存未命中: has_meta={'yes' if cached_meta else 'no'}, has_etag={'yes' if (cached_meta and cached_meta.get('etag')) else 'no'}", flush=True)
     return CacheCheckResponse(cached=False)
 
 
@@ -139,23 +135,18 @@ async def review_pr(
     context_builder: ContextBuilder = Depends(get_context_builder),
     storage: ResultStorage = Depends(get_result_storage),
 ):
-    print(f"[review_pr] >>> 入口, URL={request.pr_url}", flush=True)
     logger.info(f"[review_pr] >>> 入口, URL={request.pr_url}")
     start_time = time.time()
 
     try:
         pr_data = github.fetch_pr_data(request.pr_url)
-        print(f"[review_pr] Step1 OK: {pr_data.total_files} files", flush=True)
         logger.info(f"[review_pr] Step1 OK: {pr_data.total_files} files")
     except ValueError as e:
-        print(f"[review_pr] Step1 ValueError: {e}", flush=True)
         raise HTTPException(status_code=400, detail=str(e))
     except GitHubAPIError as e:
-        print(f"[review_pr] Step1 GitHubAPIError: {e}", flush=True)
         raise HTTPException(status_code=e.status_code or 502, detail=str(e))
 
     has_changes = context_builder.has_meaningful_changes(pr_data)
-    print(f"[review_pr] has_meaningful_changes={has_changes}", flush=True)
     if not has_changes:
         logger.info(f"PR 无有效代码变更, 跳过分析")
         return PRReviewResponse(
@@ -167,26 +158,21 @@ async def review_pr(
         )
 
     mode = context_builder.determine_mode(pr_data)
-    print(f"[review_pr] Step2 mode={mode.value}", flush=True)
 
     if mode.value == "trivial":
         context = context_builder.build_trivial_context(pr_data)
     else:
         context = context_builder.build_context(pr_data)
 
-    print(f"[review_pr] Step3 开始 LLM 分析...", flush=True)
     try:
         if mode.value == "trivial":
             analysis = llm.analyze(pr_data, context, mode)
         else:
             analysis = llm.analyze_per_file(pr_data, context, mode, context_builder)
-        print(f"[review_pr] Step3 OK: risks={len(analysis.risks)}, tokens={analysis.token_used}", flush=True)
     except RuntimeError as e:
-        print(f"[review_pr] Step3 RuntimeError: {e}", flush=True)
         error_msg = _friendly_error(str(e))
         raise HTTPException(status_code=502, detail=error_msg)
     except Exception as e:
-        print(f"[review_pr] Step3 未预期异常: {type(e).__name__}: {e}", flush=True)
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=502, detail=f"LLM 分析异常: {e}")
@@ -194,7 +180,6 @@ async def review_pr(
     total_ms = int((time.time() - start_time) * 1000)
     logger.info(f"PR Review 完成, 总耗时: {total_ms}ms")
 
-    print(f"[review_pr] Step4 准备保存, storage.enabled={storage.enabled}, dir={storage.results_dir}", flush=True)
     logger.info(f"[review_pr] Step4 准备保存: enabled={storage.enabled}, dir={storage.results_dir}")
     try:
         saved_id = storage.save_result(
@@ -206,11 +191,9 @@ async def review_pr(
             duration_ms=total_ms,
             etag=github.last_etag,
         )
-        print(f"[review_pr] Step4 保存完成: {saved_id}", flush=True)
         logger.info(f"[review_pr] Step4 保存完成: {saved_id}")
     except Exception as e:
         import traceback
-        print(f"[review_pr] Step4 保存异常: {e}", flush=True)
         traceback.print_exc()
         logger.error(f"[review_pr] Step4 保存异常: {e}", exc_info=True)
 
@@ -328,7 +311,6 @@ async def review_pr_stream(
                             token_used=captured_done.get("tokens", 0),
                             analysis_duration_ms=captured_done.get("duration_ms", 0),
                         )
-                        print(f"[sse_stream] 流式分析完成, 正在保存结果...", flush=True)
                         logger.info(f"[sse_stream] 流式分析完成, 正在保存结果: risks={len(risk_objs)}, tokens={analysis_result.token_used}")
                         saved = storage.save_result(
                             pr_url=request.pr_url,
@@ -339,11 +321,9 @@ async def review_pr_stream(
                             duration_ms=analysis_result.analysis_duration_ms,
                             etag=github.last_etag,
                         )
-                        print(f"[sse_stream] 保存完成: {saved}", flush=True)
                         logger.info(f"[sse_stream] 保存完成: {saved}")
                     except Exception as e:
                         import traceback
-                        print(f"[sse_stream] 保存异常: {e}", flush=True)
                         traceback.print_exc()
                         logger.error(f"[sse_stream] 保存异常: {e}", exc_info=True)
 
