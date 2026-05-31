@@ -9,7 +9,7 @@ LLM 分析服务模块
   Stage 2 - 风险识别: 逐文件/逐段识别风险代码 (带自我反驳)
   Stage 3 - 结果整合: 合并多阶段结果, 去重, 格式化
 
-支持的模型: 任何兼容 OpenAI API 的模型 (GPT-4o, DeepSeek-V3, Claude 等)
+支持的模型: 任何兼容 OpenAI API 的模型 (GPT-4o, DeepSeek-V4, Claude 等)
 """
 
 import asyncio

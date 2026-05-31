@@ -32,7 +32,7 @@ class GitHubConfig:
 class LLMConfig:
     """LLM 调用相关配置"""
     api_key: str = ""
-    api_base_url: str = "https://api.deepseek.com"
+    api_base_url: str = "https://api.deepseek.com/v1"
     model_name: str = "deepseek-v4-flash"
     max_tokens: int = 8192
     temperature: float = 0.1
@@ -85,7 +85,7 @@ def load_config() -> AppConfig:
 
     config.llm.api_key = os.getenv("LLM_API_KEY", "")
     config.llm.api_base_url = os.getenv("LLM_API_BASE", "https://api.deepseek.com/v1")
-    config.llm.model_name = os.getenv("LLM_MODEL", "deepseek-chat")
+    config.llm.model_name = os.getenv("LLM_MODEL", "deepseek-v4-flash")
     config.llm.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "4096"))
     config.llm.temperature = float(os.getenv("LLM_TEMPERATURE", "0.1"))
 
