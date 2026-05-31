@@ -9,7 +9,9 @@ FastAPI 应用主文件, 负责:
 """
 
 import logging
+import os
 import sys
+from logging.handlers import TimedRotatingFileHandler
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,11 +22,31 @@ from routers.review import router as review_router
 
 # ── 日志配置 ──
 
+LOG_DIR = os.path.join(os.path.dirname(__file__), "..", "logger")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+LOG_FORMAT = logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(LOG_FORMAT)
+
+file_handler = TimedRotatingFileHandler(
+    os.path.join(LOG_DIR, "app.log"),
+    when="midnight",
+    interval=1,
+    backupCount=7,
+    encoding="utf-8",
+)
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(LOG_FORMAT)
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-    stream=sys.stdout,
+    handlers=[console_handler, file_handler],
 )
 
 logger = logging.getLogger(__name__)
